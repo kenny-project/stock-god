@@ -1,0 +1,33 @@
+# 价值投资关注列表
+# 每行一个 ticker，# 开头的行为注释
+# 注：脚本自动识别中概股（BABA/JD/PDD 等）使用 20-F 格式下载
+
+# 科技
+AAPL
+MSFT
+NVDA
+GOOGL
+META
+
+# 消费
+NKE
+COST
+PG
+
+# 医疗
+PFE
+LLY
+JNJ
+
+# 金融
+BRK.B
+JPM
+V
+
+# 中概（自动使用 20-F 格式）
+BABA
+JD
+PDD
+BIDU
+NIO
+TME
