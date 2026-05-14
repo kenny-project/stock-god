@@ -18,7 +18,8 @@ import urllib.request
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from datetime import datetime
 
-REPORTS_DIR = os.path.expanduser("~/.openclaw/reports/")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPORTS_DIR = os.path.join(PROJECT_ROOT, "reports")
 REPORTS_TMP = os.path.join(REPORTS_DIR, "tmp")
 os.makedirs(REPORTS_DIR, exist_ok=True)
 os.makedirs(REPORTS_TMP, exist_ok=True)

@@ -27,8 +27,8 @@ import importlib.util, hashlib
 from datetime import datetime
 
 # ── futuapi common ─────────────────────────────────────
-_SPEC = importlib.util.spec_from_file_location(
-    "_fc", "/Users/wmh/.openclaw/skills/futuapi/scripts/common.py")
+_FUTUAPI_PATH = os.path.expanduser("~/.openclaw/skills/futuapi/scripts/common.py")
+_SPEC = importlib.util.spec_from_file_location("_fc", _FUTUAPI_PATH)
 _MOD = importlib.util.module_from_spec(_SPEC)
 sys.modules["_fc"] = _MOD; _SPEC.loader.exec_module(_MOD)
 create_quote_context = _MOD.create_quote_context
@@ -44,7 +44,8 @@ FMP_URL = "https://financialmodelingprep.com/stable"
 # ── 缓存目录 ───────────────────────────────────────────
 CACHE_DIR = os.path.expanduser("~/.openclaw/cache/stock-analysis/")
 os.makedirs(CACHE_DIR, exist_ok=True)
-SEC_FILINGS_DIR = os.path.expanduser("~/.openclaw/reports/sec_filings/")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SEC_FILINGS_DIR = os.path.join(PROJECT_ROOT, "reports", "sec_filings")
 
 
 def _cache_path(namespace, key):
@@ -1136,7 +1137,7 @@ def report_analyze(symbol, use_cache=True):
         else:
             print(f"\n【SEC 财报分析】")
             print(f"  ⚠️ 未获取到 SEC 财报数据")
-            print(f"  提示：运行 `python3 ~/.openclaw/skills/stock-god/scripts/sec_filings.py download {symbol}` 下载")
+            print(f"  提示：运行 `python3 scripts/sec_filings.py download {symbol}` 下载")
 
     # K线
     if klines:
@@ -1276,7 +1277,7 @@ if __name__=="__main__":
         # 自动命名：SYMBOL_YYYYMMDD_HHMMSS.txt
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_name = re.sub(r'[.\s]+', '_', args.code)
-        out_path = os.path.expanduser(f"~/.openclaw/reports/{safe_name}_{ts}.txt")
+        out_path = os.path.join(PROJECT_ROOT, "reports", f"{safe_name}_{ts}.txt")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w") as f:
         f.write(report_text)

@@ -13,7 +13,8 @@ import sys
 import urllib.request
 from datetime import datetime
 
-REPORTS_DIR = os.path.expanduser("~/.openclaw/reports/")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPORTS_DIR = os.path.join(PROJECT_ROOT, "reports")
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
 SEC_API_BASE = "https://data.sec.gov/submissions"
@@ -254,6 +255,7 @@ def cmd_download(symbol, form_type=None, index=0, fiscal_year=None, force=False,
 
             filing_url = build_filing_url(cik_short, acc_flat, doc)
             print(f"  [{form}] {date} - {doc}")
+            print(f"    URL: {filing_url}")
 
             # 检查是否已下载
             filing_name = doc

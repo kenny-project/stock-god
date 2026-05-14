@@ -6,6 +6,7 @@
 目录结构:
   ticker_dir/
   ├── filing.htm              ← 主文档（最外层）
+  ├── filing_report.htm       ← 子目录中实际报告的副本（如有）
   └── filing/                 ← 附件子目录
       ├── filing.xsd
       ├── exhibit1.htm
@@ -19,7 +20,8 @@ import urllib.request
 
 HEADERS = {"User-Agent": "PersonalResearch/1.0 (personal@email.com)"}
 SEC_BASE = "https://www.sec.gov"
-REPORTS_DIR = os.path.expanduser("~/.openclaw/reports/")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPORTS_DIR = os.path.join(PROJECT_ROOT, "reports")
 
 
 def download_file(url, out_path, force=False):
@@ -60,7 +62,7 @@ def download_filing(base_url, ticker_dir, force=False):
     """
     下载 SEC filing 的所有关联文件
     base_url: 如 https://www.sec.gov/Archives/edgar/data/804328/000080432826000061/qcom-20260329.htm
-    ticker_dir: 如 ~/.openclaw/reports/sec_filings/QCOM/
+    ticker_dir: 如 reports/sec_filings/QCOM/
     force: 是否强制重新下载已存在的文件
     
     目录结构:
@@ -157,8 +159,69 @@ def download_filing(base_url, ticker_dir, force=False):
                     pass
     
     print(f"\n[4] Downloaded {image_count} images")
-    
-    # 5. 列出最终文件
+
+    # 5. 选择子目录中最合适的 .htm 文件复制到外层目录（方便浏览器直接打开）
+    #    优先级：匹配 filing_stem 的文件 > 最大的 .htm 文件
+    #    复制时重写相对路径，加上子目录前缀，确保图片等资源能正确加载
+    copied_reports = []
+    if os.path.isdir(sub_dir):
+        htm_files = [f for f in os.listdir(sub_dir)
+                     if f.endswith(('.htm', '.html')) and f != filing_name]
+        if htm_files:
+            # 优先选匹配 filing_stem 的文件（如 nvo-20251231_d2.htm）
+            best = None
+            for f in htm_files:
+                if f.startswith(filing_stem):
+                    best = f
+                    break
+            # 没有匹配的，选最大的
+            if not best:
+                best = max(htm_files, key=lambda f: os.path.getsize(os.path.join(sub_dir, f)))
+
+            src = os.path.join(sub_dir, best)
+            dst_name = f"{filing_stem}_report{os.path.splitext(best)[1]}"
+            dst = os.path.join(ticker_dir, dst_name)
+            if not os.path.exists(dst):
+                try:
+                    with open(src, "r", encoding="utf-8", errors="ignore") as f:
+                        content = f.read()
+                    # 重写相对路径：加上子目录前缀
+                    def _rewrite_href(m):
+                        attr = m.group(1)   # href 或 src
+                        eq = m.group(2)     # = 或 ==
+                        quote = m.group(3)  # ' 或 "
+                        ref = m.group(4)
+                        if ref.startswith(('http://', 'https://', 'javascript:', 'mailto:', '/')):
+                            return m.group(0)
+                        if ref.startswith(filing_stem + '/'):
+                            return m.group(0)
+                        return f'{attr}{eq}{quote}{filing_stem}/{ref}{quote}'
+
+                    def _rewrite_url(m):
+                        prefix = m.group(1)  # url(
+                        quote = m.group(2)   # 可选引号
+                        ref = m.group(3)
+                        suffix = m.group(4)  # 可选引号 + )
+                        if ref.startswith(('http://', 'https://', '/')):
+                            return m.group(0)
+                        if ref.startswith(filing_stem + '/'):
+                            return m.group(0)
+                        return f'{prefix}{quote}{filing_stem}/{ref}{suffix}'
+
+                    content = re.sub(
+                        r'((?:href|src))(=+)([\'"])([^\'"#]+)([\'"])',
+                        _rewrite_href, content)
+                    content = re.sub(
+                        r'(url\()(["\']?)([^"\')]+)(["\']?\))',
+                        _rewrite_url, content)
+                    with open(dst, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    copied_reports.append(dst_name)
+                    print(f"  Copied: {best} → {dst_name} (paths rewritten)")
+                except Exception as e:
+                    print(f"  WARN: failed to copy {best}: {e}")
+
+    # 6. 列出最终文件
     print(f"\n=== Final structure ===")
     print(f"  {filing_name} (main document)")
     if os.path.isdir(sub_dir):
@@ -166,9 +229,14 @@ def download_filing(base_url, ticker_dir, force=False):
             fpath = os.path.join(sub_dir, f)
             size = os.path.getsize(fpath)
             print(f"  {filing_stem}/{f} ({size/1024:.1f} KB)")
-    
+    for r in copied_reports:
+        print(f"  {r} (copied report)")
+
     print(f"\n=== Done ===")
-    print(f"Open {main_path} in browser to view.")
+    if copied_reports:
+        print(f"Open {copied_reports[0]} in browser to view the full report.")
+    else:
+        print(f"Open {filing_name} in browser to view.")
     return True
 
 

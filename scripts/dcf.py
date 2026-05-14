@@ -24,8 +24,9 @@ import sys
 from datetime import datetime
 
 # 目录配置
-ANALYSIS_DIR = os.path.expanduser("~/.openclaw/reports/sec_analysis/")
-REPORTS_DIR = os.path.expanduser("~/.openclaw/reports/")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ANALYSIS_DIR = os.path.join(PROJECT_ROOT, "reports", "sec_analysis")
+REPORTS_DIR = os.path.join(PROJECT_ROOT, "reports")
 
 
 # ── 数据获取 ────────────────────────────────────────────
@@ -33,8 +34,8 @@ REPORTS_DIR = os.path.expanduser("~/.openclaw/reports/")
 def get_futu_snapshot(ticker):
     """从 Futu OpenD 获取实时行情快照"""
     try:
-        spec = importlib.util.spec_from_file_location(
-            "_fc", "/Users/wmh/.openclaw/skills/futuapi/scripts/common.py")
+        futuapi_path = os.path.expanduser("~/.openclaw/skills/futuapi/scripts/common.py")
+        spec = importlib.util.spec_from_file_location("_fc", futuapi_path)
         mod = importlib.util.module_from_spec(spec)
         sys.modules["_fc"] = mod
         spec.loader.exec_module(mod)

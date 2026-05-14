@@ -23,7 +23,8 @@ from .report import (
 )
 
 # 目录配置
-REPORTS_DIR = os.path.expanduser("~/.openclaw/reports/sec_filings/")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPORTS_DIR = os.path.join(PROJECT_ROOT, "reports", "sec_filings")
 
 
 def get_analyzer(filing_type: str):

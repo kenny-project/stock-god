@@ -24,8 +24,8 @@ import importlib.util
 from datetime import datetime
 
 # ── 加载 futuapi common ────────────────────────────────
-_SPEC = importlib.util.spec_from_file_location(
-    "_fc", "/Users/wmh/.openclaw/skills/futuapi/scripts/common.py")
+_FUTUAPI_PATH = os.path.expanduser("~/.openclaw/skills/futuapi/scripts/common.py")
+_SPEC = importlib.util.spec_from_file_location("_fc", _FUTUAPI_PATH)
 _MOD = importlib.util.module_from_spec(_SPEC)
 sys.modules["_fc"] = _MOD
 _SPEC.loader.exec_module(_MOD)
@@ -37,6 +37,7 @@ FMP_KEY  = "OeyYwkTOzQUfkywmNu8p0NFIP1pTSv6x"
 FMP_URL  = "https://financialmodelingprep.com/stable"
 AV_KEY   = "UQ3XI876M9S3PKND"
 AV_URL   = "https://www.alphavantage.co/query"
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCREENER_DATA = os.path.expanduser("~/.openclaw/workspace-stock_god/value-screener/data/")
 CACHE_DIR = os.path.expanduser("~/.openclaw/cache/stock-god/screener/")
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -457,7 +458,7 @@ def main():
     print(f"\n⚠️ 本报告仅供参考，不构成投资建议。")
 
     # 保存报告
-    out_dir = os.path.expanduser("~/.openclaw/reports/")
+    out_dir = os.path.join(PROJECT_ROOT, "reports")
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, f"value_screener_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
     report_lines = [f"# 价值股精选池报告", f"生成时间：{ts}",

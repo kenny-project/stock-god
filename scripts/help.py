@@ -54,8 +54,8 @@ HELP_TEXT = """
      完整映射见 scripts/sec_filings.py CN_NAME_MAP
 
   📂 报告输出路径
-     ~/.openclaw/reports/       ← 报告和 PDF
-     ~/.openclaw/reports/sec_filings/  ← SEC 原始文件
+     reports/                   ← 报告和 PDF
+     reports/sec_filings/       ← SEC 原始文件
 
   🔑 数据源
      Futu OpenD   实时行情/K线（主力）

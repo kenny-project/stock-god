@@ -24,8 +24,9 @@ except ImportError:
     print("⚠️  deep-translator 未安装，翻译功能不可用")
 
 # 目录配置
-REPORTS_DIR = os.path.expanduser("~/.openclaw/reports/sec_filings/")
-ANALYSIS_DIR = os.path.expanduser("~/.openclaw/reports/sec_analysis/")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPORTS_DIR = os.path.join(PROJECT_ROOT, "reports", "sec_filings")
+ANALYSIS_DIR = os.path.join(PROJECT_ROOT, "reports", "sec_analysis")
 
 # API Keys
 FMP_KEY = "OeyYwkTOzQUfkywmNu8p0NFIP1pTSv6x"
@@ -288,8 +289,8 @@ def get_futu_snapshot(ticker: str) -> Optional[Dict]:
     """从 Futu OpenD 获取实时行情快照"""
     try:
         # 动态加载 futuapi common 模块
-        spec = importlib.util.spec_from_file_location(
-            "_fc", "/Users/wmh/.openclaw/skills/futuapi/scripts/common.py")
+        futuapi_path = os.path.expanduser("~/.openclaw/skills/futuapi/scripts/common.py")
+        spec = importlib.util.spec_from_file_location("_fc", futuapi_path)
         mod = importlib.util.module_from_spec(spec)
         sys.modules["_fc"] = mod
         spec.loader.exec_module(mod)
