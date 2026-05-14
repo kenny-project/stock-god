@@ -217,7 +217,14 @@ def cmd_download(symbol, form_type=None, index=0, fiscal_year=None, force=False,
     if form_type:
         target_forms = [f.strip().upper() for f in form_type.split(",")]
     else:
-        target_forms = ["10-K", "10-Q"]
+        # 自动检测外国公司：检查是否有 20-F / 6-K 提交记录
+        recent_forms = set(forms[:30])  # 看最近30条
+        has_foreign = bool(recent_forms & {"20-F", "20-F/A", "6-K", "6-K/A"})
+        if has_foreign:
+            target_forms = ["20-F", "6-K"]
+            print(f"  (检测到外国公司，自动使用 20-F + 6-K)")
+        else:
+            target_forms = ["10-K", "10-Q"]
 
     # 找到所有匹配的表单
     matches = [i for i in range(len(forms)) if forms[i] in target_forms]

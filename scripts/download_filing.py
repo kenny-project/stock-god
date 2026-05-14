@@ -24,22 +24,27 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPORTS_DIR = os.path.join(PROJECT_ROOT, "reports")
 
 
-def download_file(url, out_path, force=False):
-    """下载单个文件。force=False 时跳过已存在的文件。"""
+def download_file(url, out_path, force=False, retries=3):
+    """下载单个文件。force=False 时跳过已存在的文件。失败时自动重试。"""
+    import time
     if not force and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
         print(f"  SKIP (已存在): {os.path.basename(out_path)}")
         return -1  # 表示跳过
-    try:
-        req = urllib.request.Request(url, headers=HEADERS)
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            content = resp.read()
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        with open(out_path, "wb") as f:
-            f.write(content)
-        return len(content)
-    except Exception as e:
-        print(f"  SKIP: {url} ({e})")
-        return 0
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                content = resp.read()
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            with open(out_path, "wb") as f:
+                f.write(content)
+            return len(content)
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(2 * (attempt + 1))
+                continue
+            print(f"  FAIL ({retries}次重试后): {os.path.basename(url)} ({e})")
+            return 0
 
 
 def find_all_references(html_content):
@@ -90,6 +95,11 @@ def download_filing(base_url, ticker_dir, force=False):
         print(f"\n=== Done (文件已存在，跳过) ===")
         print(f"Open {main_path} in browser to view.")
         return True
+    if size == 0:
+        print(f"\n=== FAILED: 下载主文档失败，可能是网络超时 ===")
+        print(f"URL: {base_url}")
+        print(f"提示: 可尝试手动下载或稍后重试")
+        return False
     print(f"  -> {main_path} ({size/1024:.1f} KB)")
     
     # 2. 读取主文档，提取所有引用
@@ -160,11 +170,11 @@ def download_filing(base_url, ticker_dir, force=False):
     
     print(f"\n[4] Downloaded {image_count} images")
 
-    # 5. 选择子目录中最合适的 .htm 文件复制到外层目录（方便浏览器直接打开）
-    #    优先级：匹配 filing_stem 的文件 > 最大的 .htm 文件
+    # 5. 如果主文档是索引页（<500KB），复制子目录中的实际报告到外层目录
     #    复制时重写相对路径，加上子目录前缀，确保图片等资源能正确加载
     copied_reports = []
-    if os.path.isdir(sub_dir):
+    main_size = os.path.getsize(main_path) if os.path.exists(main_path) else 0
+    if main_size < 500 * 1024 and os.path.isdir(sub_dir):
         htm_files = [f for f in os.listdir(sub_dir)
                      if f.endswith(('.htm', '.html')) and f != filing_name]
         if htm_files:
