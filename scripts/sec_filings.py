@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 from datetime import datetime
 
@@ -115,19 +116,27 @@ def normalize_ticker(symbol):
 def lookup_cik(ticker):
     ticker = ticker.upper()
     req = urllib.request.Request(SEC_COMPANY_TICKERS, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        data = json.loads(resp.read())
-        for entry in data.values():
-            if entry.get("ticker", "").upper() == ticker:
-                return str(entry["cik_str"]).zfill(10), entry.get("title", ticker)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        print(f"ERROR: 访问 SEC EDGAR 超时或网络异常: {e}")
+        return None, None
+    for entry in data.values():
+        if entry.get("ticker", "").upper() == ticker:
+            return str(entry["cik_str"]).zfill(10), entry.get("title", ticker)
     return None, None
 
 
 def fetch_submissions(cik):
     url = f"{SEC_API_BASE}/CIK{cik}.json"
     req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read())
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        print(f"ERROR: 获取 SEC 提交记录超时或网络异常: {e}")
+        return None
 
 
 def build_filing_url(cik_short, accession_flat, filename):
@@ -149,6 +158,8 @@ def cmd_list(symbol, form_filter=None, limit=50):
     print(f"CIK: {cik}\n")
 
     data = fetch_submissions(cik)
+    if not data:
+        return False
     recent = data["filings"]["recent"]
 
     forms = recent.get("form", [])
@@ -206,6 +217,8 @@ def cmd_download(symbol, form_type=None, index=0, fiscal_year=None, force=False,
     print(f"Form: {form_type or '10-K + 10-Q'} | Years: {years}")
 
     data = fetch_submissions(cik)
+    if not data:
+        return False
     recent = data["filings"]["recent"]
 
     forms = recent.get("form", [])
@@ -261,19 +274,26 @@ def cmd_download(symbol, form_type=None, index=0, fiscal_year=None, force=False,
             acc_flat = acc.replace("-", "")
 
             filing_url = build_filing_url(cik_short, acc_flat, doc)
+            ticker_dir = os.path.join(REPORTS_DIR, "sec_filings", ticker)
+
+            # 对于6-K，只下载附件中的季度报告，不下载封面页
+            if form in ("6-K", "6-K/A"):
+                _download_6k_quarterly_report(filing_url, ticker_dir, date, force)
+                downloaded_count += 1
+                continue
+
             print(f"  [{form}] {date} - {doc}")
             print(f"    URL: {filing_url}")
 
             # 检查是否已下载
             filing_name = doc
-            ticker_dir = os.path.join(REPORTS_DIR, "sec_filings", ticker)
             existing_path = os.path.join(ticker_dir, filing_name)
             if not force and os.path.exists(existing_path) and os.path.getsize(existing_path) > 0:
                 print(f"    SKIP (已存在): {filing_name}")
                 skipped_count += 1
                 continue
 
-            # 下载
+            # 下载主文档（10-K/10-Q/20-F）
             cmd = [sys.executable, script, filing_url, ticker]
             if force:
                 cmd.append("--force")
@@ -287,6 +307,86 @@ def cmd_download(symbol, form_type=None, index=0, fiscal_year=None, force=False,
 
     print(f"\n=== 完成: 下载 {downloaded_count} 份, 跳过 {skipped_count} 份 ===")
     return downloaded_count > 0 or skipped_count > 0
+
+
+def _download_6k_quarterly_report(filing_url, ticker_dir, date, force=False):
+    """从6-K中提取并保存季度报告（只保存附件，不保存封面页）"""
+    import subprocess
+    script = os.path.join(os.path.dirname(__file__), "download_filing.py")
+
+    # 从主文档URL获取附件目录
+    base_dir = filing_url.rsplit('/', 1)[0] + '/'
+
+    # 下载主文档内容，解析附件链接
+    try:
+        req = urllib.request.Request(filing_url, headers=HEADERS)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            content = resp.read().decode('utf-8', errors='ignore')
+    except Exception as e:
+        print(f"    ⚠️ 无法解析6-K主文档: {e}")
+        return
+
+    # 提取所有附件链接和描述
+    exhibit_pattern = re.compile(
+        r'href="([^"]*_ex\d+[-_]\d+[^"]*\.htm[l]?)"[^>]*>([^<]*)',
+        re.IGNORECASE
+    )
+    exhibits = exhibit_pattern.findall(content)
+
+    if not exhibits:
+        simple_pattern = re.compile(r'href="([^"]*_ex\d+[-_]\d+[^"]*\.htm[l]?)"', re.IGNORECASE)
+        exhibits = [(m, '') for m in simple_pattern.findall(content)]
+
+    for exhibit, description in exhibits:
+        exhibit_lower = exhibit.lower()
+        desc_lower = description.lower()
+
+        # 只处理 exhibit 99-1
+        if not any(p in exhibit_lower for p in ['ex99-1', 'ex99_1', 'ex99.1']):
+            continue
+
+        exhibit_url = base_dir + exhibit
+        ticker = os.path.basename(ticker_dir)
+        output_name = f"{ticker}_6K_{date}.htm"
+        output_path = os.path.join(ticker_dir, output_name)
+
+        if not force and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            print(f"  [6-K] {date} - SKIP (已存在): {output_name}")
+            return
+
+        # 先下载附件，检查内容是否是季度报告
+        try:
+            req = urllib.request.Request(exhibit_url, headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                file_content = resp.read()
+
+            # 检查文件大小，太小的跳过（季度报告通常>50KB）
+            if len(file_content) < 50000:
+                print(f"  [6-K] {date} - 跳过小文件 ({len(file_content)/1024:.1f}KB): {exhibit}")
+                return
+
+            # 解析内容，只检查前2000字符的标题部分
+            text_head = file_content[:10000].decode('utf-8', errors='ignore').lower()
+
+            # 季度报告标题关键词（在标题中出现）
+            quarterly_title_keywords = ['quarter', 'result', 'earnings', 'financial', 'revenue']
+
+            # 检查标题是否包含季度报告关键词
+            is_quarterly = any(kw in text_head for kw in quarterly_title_keywords)
+
+            if not is_quarterly:
+                print(f"  [6-K] {date} - 跳过非季度报告: {exhibit}")
+                return
+
+            # 是季度报告，保存文件
+            os.makedirs(ticker_dir, exist_ok=True)
+            with open(output_path, 'wb') as f:
+                f.write(file_content)
+            print(f"  [6-K] {date} - ✅ 下载完成: {output_name}")
+
+        except Exception as e:
+            print(f"  [6-K] {date} - ❌ 下载失败: {e}")
+        return
 
 
 def download_images(html_path, cik_short, accession_flat):
@@ -337,6 +437,8 @@ def cmd_download_url(url, symbol=None, force=False):
                 with urllib.request.urlopen(req, timeout=15) as resp:
                     data = json.loads(resp.read())
                 ticker = data.get("tickers", [None])[0]
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                print(f"WARNING: 查询 CIK 信息超时: {e}")
             except Exception:
                 pass
     if not ticker:
@@ -365,7 +467,7 @@ def main():
     p_dl.add_argument("symbol", nargs="?", help="股票代码, e.g. US.NKE")
     p_dl.add_argument("--form", type=str, default=None, help="表单类型 (default: 最新任意类型, e.g. 10-K,10-Q)")
     p_dl.add_argument("--index", type=int, default=0, help="第几份, 0=最新 (default: 0)")
-    p_dl.add_argument("--fy", type=int, help="指定财年, e.g. 2024")
+    p_dl.add_argument("--fy", "--year", type=int, help="指定财年, e.g. 2024")
     p_dl.add_argument("--years", type=int, default=5, help="下载近N年的财报 (default: 5)")
     p_dl.add_argument("--url", type=str, help="直接按 SEC URL 下载")
     p_dl.add_argument("--force", action="store_true", help="强制重新下载已存在的文件")
