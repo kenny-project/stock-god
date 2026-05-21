@@ -30,6 +30,8 @@ metadata:
 | `/stock-god analyze QCOM --form 10-K` | 分析指定表单类型的财报 |
 | `/stock-god dcf US.NKE` | 巴菲特式 DCF 现金流折现估值 |
 | `/stock-god vix` | VIX 恐慌指数查询 |
+| `/stock-god fees` | 手续费统计报告（按月/年/总汇总）|
+| `/stock-god fees --year 2025` | 查询指定年份的手续费 |
 
 ### 中文名/别名支持
 

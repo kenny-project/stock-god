@@ -28,6 +28,10 @@ python3 scripts/sec_analysis.py MSFT --all
 # DCF 估值
 python3 scripts/dcf.py US.NKE
 python3 scripts/dcf.py QCOM --growth 8 --discount 10
+
+# 手续费统计
+python3 scripts/fee_report.py              # 查询当前年份
+python3 scripts/fee_report.py --year 2025  # 查询指定年份
 ```
 
 ## Dependencies
