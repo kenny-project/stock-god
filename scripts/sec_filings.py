@@ -204,7 +204,132 @@ def cmd_list(symbol, form_filter=None, limit=50):
     return True
 
 
-def cmd_download(symbol, form_type=None, index=0, fiscal_year=None, force=False, years=5):
+def translate_html_to_chinese(html_path, sec_url=None):
+    """将 HTML 翻译成中文，保存为 {name}_zh-cn.html
+
+    批量收集文本 → 一次性翻译 → 替换回去，保留 HTML 结构。
+    """
+    import re
+
+    name_stem = os.path.splitext(html_path)[0]
+    zh_path = f"{name_stem}_zh-cn.html"
+
+    if os.path.exists(zh_path) and os.path.getsize(zh_path) > 1000:
+        print(f"  中文版已存在: {os.path.basename(zh_path)}")
+        return zh_path
+
+    try:
+        from deep_translator import GoogleTranslator
+    except ImportError:
+        print(f"  ❌ 翻译失败: 需要安装 deep_translator (pip install deep-translator)")
+        return None
+
+    print(f"  翻译中... (deep_translator)")
+
+    with open(html_path, "r", encoding="utf-8", errors="ignore") as f:
+        html_content = f.read()
+
+    translator = GoogleTranslator(source='en', target='zh-CN')
+
+    # 保护不应该翻译的区域
+    protected = []
+    def protect_match(m):
+        protected.append(m.group(0))
+        return f'__PROTECTED_{len(protected)-1}__'
+    def protect_str(s):
+        protected.append(s)
+        return f'__PROTECTED_{len(protected)-1}__'
+
+    # 1. 保护 XML 声明
+    html_content = re.sub(r'<\?xml[^?]*\?>', protect_match, html_content)
+    # 2. 保护 HTML 注释
+    html_content = re.sub(r'<!--.*?-->', protect_match, html_content)
+    # 3. 保护 script/style/code/pre 标签内容
+    html_content = re.sub(r'<(script|style|code|pre)[^>]*>.*?</\1>', protect_match, html_content, flags=re.DOTALL | re.IGNORECASE)
+    # 4. 保护 meta/title 标签（不翻译）
+    html_content = re.sub(r'<(meta|title)[^>]*>.*?</\1>', protect_match, html_content, flags=re.DOTALL | re.IGNORECASE)
+    # 5. 保护 XBRL 标签及其内容（ix:, xbrli:, link:, xlink: 等）
+    html_content = re.sub(r'<(ix:[^ >]+|xbrli:[^ >]+|link:[^ >]+|xlink:[^ >]+)[^>]*>.*?</\1>', protect_match, html_content, flags=re.DOTALL | re.IGNORECASE)
+    # 6. 保护自闭合的 XBRL 标签
+    html_content = re.sub(r'<(ix:[^ >]+|xbrli:[^ >]+|link:[^ >]+|xlink:[^ >]+)[^>]*/>', protect_match, html_content, flags=re.IGNORECASE)
+    # 7. 保护标签属性中的值
+    html_content = re.sub(r'(\w+)="([^"]*)"', lambda m: m.group(1) + '="' + protect_str(m.group(2)) + '"', html_content)
+
+    # 收集所有需要翻译的文本片段（> 和 < 之间的内容）
+    # 只翻译 body 中的可见文本，跳过占位符
+    text_segments = []
+    for m in re.finditer(r'>([^<]+)<', html_content):
+        text = m.group(1)
+        if text.strip() and re.search(r'[a-zA-Z]{3,}', text):
+            # 跳过包含占位符的片段
+            if '__PROTECTED_' not in text:
+                text_segments.append(text)
+
+    print(f"  找到 {len(text_segments)} 个文本片段需要翻译")
+
+    # 批量翻译（合并成大块，减少 API 调用）
+    # 使用不会被翻译的特殊字符作为分隔符
+    SEP = "\n§§§\n"
+    MAX_CHUNK = 4500
+    translations = {}
+
+    current_batch = []
+    current_size = 0
+    batch_texts = []
+
+    for i, text in enumerate(text_segments):
+        if current_size + len(text) + len(SEP) > MAX_CHUNK and current_batch:
+            merged = SEP.join(current_batch)
+            try:
+                translated = translator.translate(merged)
+                parts = translated.split("§§§")
+                for orig, trans in zip(batch_texts, parts):
+                    translations[orig] = trans.strip()
+            except Exception:
+                pass
+            current_batch = []
+            batch_texts = []
+            current_size = 0
+
+        current_batch.append(text)
+        batch_texts.append(text)
+        current_size += len(text) + len(SEP)
+
+    if current_batch:
+        merged = SEP.join(current_batch)
+        try:
+            translated = translator.translate(merged)
+            parts = translated.split("§§§")
+            for orig, trans in zip(batch_texts, parts):
+                translations[orig] = trans.strip()
+        except Exception:
+            pass
+
+    print(f"  翻译完成，替换文本...")
+
+    def replace_text(m):
+        text = m.group(1)
+        return '>' + translations.get(text, text) + '<'
+
+    html_content = re.sub(r'>([^<]+)<', replace_text, html_content)
+
+    # 恢复 protected 区域
+    for i, orig in enumerate(protected):
+        html_content = html_content.replace(f'__PROTECTED_{i}__', orig)
+
+    # 修复编码声明：将 ASCII 改为 UTF-8
+    html_content = re.sub(r"encoding='ASCII'", "encoding='UTF-8'", html_content)
+    html_content = re.sub(r'encoding="ASCII"', 'encoding="UTF-8"', html_content)
+
+    with open(zh_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    size = os.path.getsize(zh_path)
+    print(f"  ✅ 翻译完成: {os.path.basename(zh_path)} ({size/1024:.1f} KB)")
+    return zh_path
+
+
+def cmd_download(symbol, form_type=None, index=0, fiscal_year=None, force=False, years=5, translate=False):
     """下载指定财报。默认下载近5年 10-K + 10-Q。"""
     import subprocess
     ticker = normalize_ticker(symbol).upper()
@@ -290,6 +415,12 @@ def cmd_download(symbol, form_type=None, index=0, fiscal_year=None, force=False,
             existing_path = os.path.join(ticker_dir, filing_name)
             if not force and os.path.exists(existing_path) and os.path.getsize(existing_path) > 0:
                 print(f"    SKIP (已存在): {filing_name}")
+                # 即使跳过下载，如果指定了 --zh 且中文版不存在，也要翻译
+                if translate:
+                    zh_name = f"{os.path.splitext(filing_name)[0]}_zh-cn.html"
+                    zh_path = os.path.join(ticker_dir, zh_name)
+                    if not os.path.exists(zh_path) or os.path.getsize(zh_path) < 1000:
+                        translate_html_to_chinese(existing_path, sec_url=filing_url)
                 skipped_count += 1
                 continue
 
@@ -301,6 +432,11 @@ def cmd_download(symbol, form_type=None, index=0, fiscal_year=None, force=False,
             if result.returncode == 0:
                 downloaded_count += 1
                 print(f"    ✅ 下载完成")
+                # 翻译成中文
+                if translate:
+                    html_path = os.path.join(ticker_dir, doc)
+                    if os.path.exists(html_path):
+                        translate_html_to_chinese(html_path, sec_url=filing_url)
             else:
                 err = result.stderr.decode(errors='ignore')[:100] if result.stderr else 'unknown error'
                 print(f"    ❌ 下载失败: {err}")
@@ -471,6 +607,7 @@ def main():
     p_dl.add_argument("--years", type=int, default=5, help="下载近N年的财报 (default: 5)")
     p_dl.add_argument("--url", type=str, help="直接按 SEC URL 下载")
     p_dl.add_argument("--force", action="store_true", help="强制重新下载已存在的文件")
+    p_dl.add_argument("--zh", action="store_true", help="下载后翻译成中文 HTML (Google Translate)")
 
     args = parser.parse_args()
 
@@ -492,7 +629,7 @@ def main():
             sym = args.symbol.upper()
             if not any(sym.startswith(p) for p in ("US.", "HK.", "A.")):
                 sym = "US." + sym
-            success = cmd_download(sym, form_type=args.form, index=args.index, fiscal_year=args.fy, force=getattr(args, 'force', False), years=args.years)
+            success = cmd_download(sym, form_type=args.form, index=args.index, fiscal_year=args.fy, force=getattr(args, 'force', False), years=args.years, translate=getattr(args, 'zh', False))
         else:
             print("ERROR: 请提供股票代码或 --url")
             sys.exit(1)

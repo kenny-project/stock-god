@@ -4,15 +4,16 @@
 
 ## 功能
 
-| 命令 | 功能 |
-|:---|:---|
-| `screener` | 价值股筛选（Futu粗筛→FMP精筛→Finviz补充→综合评分） |
-| `report` | 个股深度分析报告（14个章节） |
-| `edgar` | SEC 10-K 年报 PDF（英文+中文翻译版） |
-| `list` / `download` | SEC 财报列出与下载（支持中文名） |
-| `analyze` | SEC 财报分析（10-K/10-Q 差异化处理） |
-| `dcf` | 巴菲特式 DCF 现金流折现估值 |
-| `vix` | VIX 恐慌指数查询 |
+
+| 命令                | 功能                                                  |
+| :------------------ | :---------------------------------------------------- |
+| `screener`          | 价值股筛选（Futu粗筛→FMP精筛→Finviz补充→综合评分） |
+| `report`            | 个股深度分析报告（14个章节）                          |
+| `edgar`             | SEC 10-K 年报 PDF（英文+中文翻译版）                  |
+| `list` / `download` | SEC 财报列出与下载（支持中文名）                      |
+| `analyze`           | SEC 财报分析（10-K/10-Q 差异化处理）                  |
+| `dcf`               | 巴菲特式 DCF 现金流折现估值                           |
+| `vix`               | VIX 恐慌指数查询                                      |
 
 ## 运行
 
@@ -60,8 +61,8 @@ python3 scripts/sec_filings.py list 英特尔
 python3 scripts/sec_filings.py download US.NKE
 # 下载指定财年
 python3 scripts/sec_filings.py download US.NKE --fy 2024
-# 下载近3年财报
-python3 scripts/sec_filings.py download US.NKE --years 3
+# 下载近5年财报
+python3 scripts/sec_filings.py download US.NKE --years 5
 # 下载最新 10-Q
 python3 scripts/sec_filings.py download US.NKE --form 10-Q
 # 下载 8-K
@@ -117,13 +118,14 @@ python3 scripts/edgar_10k.py NKE --fiscal-year 2024
 
 ## 数据源
 
-| 优先级 | 数据源 | 用途 | 缓存 |
-|:---:|:---|:---|:---|
-| 1 | Futu OpenD | 实时行情、K线、snapshot | 不缓存 |
-| 2 | FMP API | 财务数据（营收/净利润/Key Metrics/分红）| 1小时 |
-| 3 | Finviz | 新闻、分析师评级、机构持仓、做空 | 1小时 |
-| 4 | 腾讯财经 | 备用实时行情 | 不缓存 |
-| 5 | Alpha Vantage | EPS surprise、EARNINGS | 1小时 |
+
+| 优先级 | 数据源        | 用途                                     | 缓存   |
+| :----: | :------------ | :--------------------------------------- | :----- |
+|   1   | Futu OpenD    | 实时行情、K线、snapshot                  | 不缓存 |
+|   2   | FMP API       | 财务数据（营收/净利润/Key Metrics/分红） | 1小时  |
+|   3   | Finviz        | 新闻、分析师评级、机构持仓、做空         | 1小时  |
+|   4   | 腾讯财经      | 备用实时行情                             | 不缓存 |
+|   5   | Alpha Vantage | EPS surprise、EARNINGS                   | 1小时  |
 
 ## 代码结构
 
@@ -152,13 +154,14 @@ scripts/
 
 所有报告输出到 `reports/` 目录：
 
-| 类型 | 路径 |
-|:---|:---|
-| 个股报告 | `reports/{SYMBOL}_{timestamp}.txt` |
+
+| 类型     | 路径                                    |
+| :------- | :-------------------------------------- |
+| 个股报告 | `reports/{SYMBOL}_{timestamp}.txt`      |
 | 选股报告 | `reports/value_screener_{timestamp}.md` |
-| SEC 分析 | `reports/sec_analysis/{TICKER}/` |
-| DCF 报告 | `reports/dcf/{TICKER}_DCF_{date}.md` |
-| 10-K PDF | `reports/{TICKER}_10K_FY{YYYY}.pdf` |
+| SEC 分析 | `reports/sec_analysis/{TICKER}/`        |
+| DCF 报告 | `reports/dcf/{TICKER}_DCF_{date}.md`    |
+| 10-K PDF | `reports/{TICKER}_10K_FY{YYYY}.pdf`     |
 
 ## 已知限制
 
