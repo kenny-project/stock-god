@@ -107,6 +107,10 @@ python3 scripts/dcf.py QCOM --years 5 --safety 0.30
 python3 scripts/dcf.py MSFT --terminal-growth 2.5
 ```
 
+### 手续费统计
+python3 scripts/fee_report.py              # 查询当前年份
+python3 scripts/fee_report.py --year 2025  # 查询指定年份
+
 ### edgar — 10-K PDF 生成
 
 ```bash

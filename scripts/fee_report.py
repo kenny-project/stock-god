@@ -123,15 +123,14 @@ def get_cash_flow_records(start_date, end_date, acc_ids=None):
                         remark = str(row.get("cashflow_remark", ""))
                         amount = float(row.get("cashflow_amount", 0))
                         # 筛选费用类记录（托管费、交易费等），排除纯资金转入转出
+                        # 费用类：托管费、交易费等（排除基金申购/赎回）
                         is_fee = (
                             "Custodian" in ctype
-                            or "Fee" in ctype
-                            or "fee" in remark.lower()
+                            or ("Fee" in ctype and "Fund" not in ctype)
                         )
-                        is_fund = "Fund" in ctype
                         is_bond = "Bond" in remark or "Treasury" in remark
 
-                        if is_fee or is_fund or is_bond:
+                        if is_fee or is_bond:
                             all_records.append({
                                 "date": d,
                                 "cashflow_type": ctype,
@@ -170,22 +169,16 @@ def group_by_month(records, time_field="create_time"):
 
 
 def group_cashflow_by_month(records):
-    """按月分组统计债券/基金费用"""
-    monthly = defaultdict(lambda: {"bond_fee": 0.0, "fund_in": 0.0, "fund_out": 0.0})
+    """按月分组统计债券费用"""
+    monthly = defaultdict(float)
     for r in records:
         d = r.get("date", "")
         month = d[:7] if len(d) >= 7 else "未知"
         ctype = r.get("cashflow_type", "")
         amount = r.get("cashflow_amount", 0)
-        direction = r.get("cashflow_direction", "")
-
-        if "Custodian" in ctype or "Fee" in ctype:
-            monthly[month]["bond_fee"] += abs(amount)
-        elif "Fund" in ctype and direction == "IN":
-            monthly[month]["fund_in"] += amount
-        elif "Fund" in ctype and direction == "OUT":
-            monthly[month]["fund_out"] += abs(amount)
-
+        # 只统计费用类（Custodian Fee 等），不统计基金交易
+        if "Custodian" in ctype or ("Fee" in ctype and "Fund" not in ctype):
+            monthly[month] += abs(amount)
     return dict(sorted(monthly.items()))
 
 
@@ -208,18 +201,16 @@ def generate_report(orders, fees, cashflow_records, year, start_date, end_date):
     stock_monthly = group_by_month(fee_orders, "create_time") if fee_orders else {}
     stock_total = sum(stock_monthly.values())
 
-    # === 债券/基金费用 ===
+    # === 债券费用 ===
     cf_monthly = group_cashflow_by_month(cashflow_records) if cashflow_records else {}
-    bond_total = sum(v["bond_fee"] for v in cf_monthly.values())
-    fund_in_total = sum(v["fund_in"] for v in cf_monthly.values())
-    fund_out_total = sum(v["fund_out"] for v in cf_monthly.values())
+    bond_total = sum(cf_monthly.values())
 
     # === 综合月度数据 ===
     all_months = sorted(set(list(stock_monthly.keys()) + list(cf_monthly.keys())))
     combined_monthly = {}
     for m in all_months:
         stock_amt = stock_monthly.get(m, 0)
-        bond_amt = cf_monthly.get(m, {}).get("bond_fee", 0)
+        bond_amt = cf_monthly.get(m, 0)
         combined_monthly[m] = stock_amt + bond_amt
 
     grand_total = stock_total + bond_total
@@ -248,10 +239,8 @@ def generate_report(orders, fees, cashflow_records, year, start_date, end_date):
         lines.append(f"| 股票订单数 | {stock_order_count} 笔 |")
 
     if cashflow_records:
-        bond_count = sum(1 for r in cashflow_records if "Custodian" in r.get("cashflow_type", "") or "Fee" in r.get("cashflow_type", ""))
-        fund_count = sum(1 for r in cashflow_records if "Fund" in r.get("cashflow_type", ""))
+        bond_count = sum(1 for r in cashflow_records if "Custodian" in r.get("cashflow_type", "") or ("Fee" in r.get("cashflow_type", "") and "Fund" not in r.get("cashflow_type", "")))
         lines.append(f"| 债券托管费记录 | {bond_count} 笔 |")
-        lines.append(f"| 基金交易记录 | {fund_count} 笔 |")
 
     # === 月度明细 ===
     if combined_monthly:
@@ -266,7 +255,7 @@ def generate_report(orders, fees, cashflow_records, year, start_date, end_date):
         ])
         for m in all_months:
             s = stock_monthly.get(m, 0)
-            b = cf_monthly.get(m, {}).get("bond_fee", 0)
+            b = cf_monthly.get(m, 0)
             t = s + b
             pct = (t / grand_total * 100) if grand_total > 0 else 0
             lines.append(f"| {m} | {s:,.2f} | {b:,.2f} | {t:,.2f} {currency} | {pct:.1f}% |")
@@ -288,28 +277,9 @@ def generate_report(orders, fees, cashflow_records, year, start_date, end_date):
             lines.append(f"| 最高月份 | {max(combined_monthly.values()):,.2f} {currency} ({max(combined_monthly, key=combined_monthly.get)}) |")
             lines.append(f"| 最低月份 | {min(combined_monthly.values()):,.2f} {currency} ({min(combined_monthly, key=combined_monthly.get)}) |")
 
-    # === 基金交易记录 ===
-    fund_records = [r for r in cashflow_records if "Fund" in r.get("cashflow_type", "")]
-    if fund_records:
-        lines.extend([
-            "",
-            "---",
-            "",
-            "## 基金交易记录",
-            "",
-            "| 日期 | 类型 | 方向 | 金额 | 备注 |",
-            "|:---|:---|:---|---:|:---|",
-        ])
-        for r in fund_records:
-            direction = "赎回" if r["cashflow_direction"] == "IN" else "申购"
-            lines.append(
-                f"| {r['date']} | {r['cashflow_type']} | {direction} "
-                f"| {r['cashflow_amount']:,.2f} {r['currency']} | {r['cashflow_remark']} |"
-            )
-
-    # === 债券托管费明细 ===
-    bond_records = [r for r in cashflow_records if "Custodian" in r.get("cashflow_type", "") or "Fee" in r.get("cashflow_type", "")]
-    if bond_records:
+    # === 债券托管费明细（仅当有非零费用时显示）===
+    bond_records = [r for r in cashflow_records if "Custodian" in r.get("cashflow_type", "") or ("Fee" in r.get("cashflow_type", "") and "Fund" not in r.get("cashflow_type", ""))]
+    if bond_records and bond_total > 0:
         lines.extend([
             "",
             "---",
@@ -410,7 +380,7 @@ def main():
         stock_monthly = group_by_month(fees, "create_time") if fees else {}
         cf_monthly = group_cashflow_by_month(cashflow_records) if cashflow_records else {}
         stock_total = sum(stock_monthly.values())
-        bond_total = sum(v["bond_fee"] for v in cf_monthly.values())
+        bond_total = sum(cf_monthly.values())
         print(json.dumps({
             "period": f"{start_date} ~ {end_date}",
             "stock_orders": len(orders),
