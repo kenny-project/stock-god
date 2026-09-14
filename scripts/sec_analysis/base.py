@@ -11,7 +11,18 @@ from typing import Dict, List, Optional, Any
 
 
 class HTMLTextExtractor(HTMLParser):
-    """从 HTML 提取纯文本"""
+    """从 HTML 提取纯文本
+
+    空白策略：文本节点按源码原样保留（相邻 inline span 拆开的单词自动合并，
+    如 MSFT 10-K 标题 "<span>ITEM 1. B</span><span>USINESS</span>"），
+    仅在块级标签边界插入空格（表格单元格/段落之间的词分隔）。
+    """
+
+    BLOCK_TAGS = {
+        "p", "div", "td", "th", "tr", "table", "thead", "tbody", "tfoot",
+        "br", "hr", "li", "ul", "ol", "dl", "dt", "dd",
+        "h1", "h2", "h3", "h4", "h5", "h6", "section", "article", "header", "footer",
+    }
 
     def __init__(self):
         super().__init__()
@@ -23,20 +34,22 @@ class HTMLTextExtractor(HTMLParser):
         self.current_tag = tag
         if tag in self.skip_tags:
             self.skip = True
+        elif tag in self.BLOCK_TAGS:
+            self.result.append(" ")
 
     def handle_endtag(self, tag):
         if tag in self.skip_tags:
             self.skip = False
+        elif tag in self.BLOCK_TAGS:
+            self.result.append(" ")
         self.current_tag = None
 
     def handle_data(self, data):
         if not hasattr(self, "skip") or not self.skip:
-            text = data.strip()
-            if text:
-                self.result.append(text)
+            self.result.append(data)
 
     def get_text(self):
-        return " ".join(self.result)
+        return re.sub(r"\s+", " ", "".join(self.result)).strip()
 
 
 class FilingAnalyzer(ABC):

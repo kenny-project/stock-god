@@ -17,7 +17,7 @@ from .extraction import REQUIRED_METRIC_FIELDS, REQUIRED_CASHFLOW_FIELDS
 
 # 翻译功能
 try:
-    from deep_translator import GoogleTranslator
+    from deep_translator import GoogleTranslator, MyMemoryTranslator
     TRANSLATOR_AVAILABLE = True
 except ImportError:
     TRANSLATOR_AVAILABLE = False
@@ -141,6 +141,10 @@ def parse_extraction_md(filepath: str) -> Optional[Dict]:
     filename = os.path.basename(filepath)
     if "10-K" in filename or "10k" in filename.lower():
         record["filing_type"] = "10-K"
+    elif "20-F" in filename or "20f" in filename.lower():
+        record["filing_type"] = "20-F"
+    elif "6-K" in filename or "6k" in filename.lower():
+        record["filing_type"] = "6-K"
     else:
         record["filing_type"] = "10-Q"
 
@@ -149,36 +153,44 @@ def parse_extraction_md(filepath: str) -> Optional[Dict]:
     if period_match:
         record["fiscal_period"] = period_match.group(1)
 
+    # 货币无关的金额解析：兼容 $/¥ 前缀与括号负数（RMB 报告如 PDD 用 ¥）
+    def _money(x):
+        x = x.strip()
+        digits = re.sub(r"[^\d]", "", x)
+        v = int(digits) if digits else 0
+        return -v if x.startswith("(") else v
+
     # 解析财务指标表格
     metrics_map = {
-        "营收": ("revenue", lambda x: int(x.replace(",", "").replace("$", "").replace("M", ""))),
-        "毛利润": ("gross_profit", lambda x: int(x.replace(",", "").replace("$", "").replace("M", ""))),
+        "营收": ("revenue", _money),
+        "毛利润": ("gross_profit", _money),
         "毛利率": ("gross_margin", lambda x: float(x.replace("%", ""))),
-        "营业利润": ("operating_income", lambda x: int(x.replace(",", "").replace("$", "").replace("M", ""))),
+        "营业利润": ("operating_income", _money),
         "营业利润率": ("operating_margin", lambda x: float(x.replace("%", ""))),
-        "净利润": ("net_income", lambda x: int(x.replace(",", "").replace("$", "").replace("M", ""))),
+        "净利润": ("net_income", _money),
         "净利率": ("net_margin", lambda x: float(x.replace("%", ""))),
-        "每股收益": ("eps", lambda x: float(x.replace("$", ""))),
-        "总资产": ("total_assets", lambda x: int(x.replace(",", "").replace("$", "").replace("M", ""))),
-        "总负债": ("total_liabilities", lambda x: int(x.replace(",", "").replace("$", "").replace("M", ""))),
-        "股东权益": ("stockholders_equity", lambda x: int(x.replace(",", "").replace("$", "").replace("M", ""))),
-        "流动资产": ("current_assets", lambda x: int(x.replace(",", "").replace("$", "").replace("M", ""))),
-        "流动负债": ("current_liabilities", lambda x: int(x.replace(",", "").replace("$", "").replace("M", ""))),
-        "现金及等价物": ("cash_equivalents", lambda x: int(x.replace(",", "").replace("$", "").replace("M", ""))),
+        "每股收益": ("eps", lambda x: float(x.replace("$", "").replace("¥", ""))),
+        "总资产": ("total_assets", _money),
+        "总负债": ("total_liabilities", _money),
+        "股东权益": ("stockholders_equity", _money),
+        "流动资产": ("current_assets", _money),
+        "流动负债": ("current_liabilities", _money),
+        "现金及等价物": ("cash_equivalents", _money),
         "资产负债率": ("debt_to_asset_ratio", lambda x: float(x.replace("%", ""))),
         "流动比率": ("current_ratio", lambda x: float(x)),
         "速动比率": ("quick_ratio", lambda x: float(x)),
         "净资产收益率": ("roe", lambda x: float(x.replace("%", ""))),
         "利息覆盖倍数": ("interest_coverage", lambda x: float(x.replace("x", ""))),
         "商誉占比": ("goodwill_to_assets", lambda x: float(x.replace("%", ""))),
-        "存货": ("inventories", lambda x: int(x.replace(",", "").replace("$", "").replace("M", ""))),
-        "利息费用": ("interest_expense", lambda x: int(x.replace(",", "").replace("$", "").replace("M", ""))),
-        "商誉": ("goodwill", lambda x: int(x.replace(",", "").replace("$", "").replace("M", ""))),
-        "净现金": ("net_cash", lambda x: int(x.replace(",", "").replace("$", "").replace("M", "").replace("(", "").replace(")", "")) * (-1 if x.strip().startswith("(") else 1)),
-        "主营营收": ("primary_revenue", lambda x: int(x.replace(",", "").replace("$", "").replace("M", ""))),
-        "主营成本": ("primary_cost", lambda x: int(x.replace(",", "").replace("$", "").replace("M", ""))),
-        "主营利润": ("primary_profit", lambda x: int(x.replace(",", "").replace("$", "").replace("M", ""))),
+        "存货": ("inventories", _money),
+        "利息费用": ("interest_expense", _money),
+        "商誉": ("goodwill", _money),
+        "主营营收": ("primary_revenue", _money),
+        "主营成本": ("primary_cost", _money),
+        "主营利润": ("primary_profit", _money),
         "主营利润率": ("primary_margin", lambda x: float(x.replace("%", ""))),
+        # 封面流通股数（百万股），非货币金额，不能用 _money（会丢小数位）
+        "流通股数": ("shares_outstanding", lambda x: float(x.replace(",", "").rstrip("M"))),
     }
 
     # 解析现金流表格（括号表示负数）
@@ -223,6 +235,8 @@ def parse_extraction_md(filepath: str) -> Optional[Dict]:
             key, parser = metrics_map[label]
             try:
                 record[key] = parser(value)
+                if "¥" in value:
+                    record["currency"] = "¥"  # RMB 报告（如 PDD），聚合表格沿用原币种
             except (ValueError, TypeError):
                 pass
 
@@ -419,6 +433,18 @@ def calculate_valuation_metrics_futu(
     return valuation
 
 
+def _translate_once(text: str) -> str:
+    """单次翻译：优先 Google，失败时回退 MyMemory。
+
+    Google 的 /m 免费端点已改为 JS 渲染页面，deep-translator 的
+    GoogleTranslator 解析不到结果会抛 TranslationNotFound（2026-09 实测），
+    MyMemoryTranslator 仍可用。"""
+    try:
+        return GoogleTranslator(source='en', target='zh-CN').translate(text)
+    except Exception:
+        return MyMemoryTranslator(source='en-US', target='zh-CN').translate(text)
+
+
 def translate_to_chinese(text: str, max_chunk: int = 4500) -> str:
     """翻译英文文本到中文"""
     if not TRANSLATOR_AVAILABLE:
@@ -428,10 +454,8 @@ def translate_to_chinese(text: str, max_chunk: int = 4500) -> str:
         return text
 
     try:
-        translator = GoogleTranslator(source='en', target='zh-CN')
-
         if len(text) <= max_chunk:
-            return translator.translate(text)
+            return _translate_once(text)
 
         chunks = []
         sentences = re.split(r'(?<=[.!?])\s+', text)
@@ -450,8 +474,7 @@ def translate_to_chinese(text: str, max_chunk: int = 4500) -> str:
 
         translated_chunks = []
         for chunk in chunks:
-            translated = translator.translate(chunk)
-            translated_chunks.append(translated)
+            translated_chunks.append(_translate_once(chunk))
 
         return " ".join(translated_chunks)
 
@@ -461,7 +484,7 @@ def translate_to_chinese(text: str, max_chunk: int = 4500) -> str:
 
 
 def detect_filing_type(filename: str, text: str = None) -> str:
-    """检测财报类型（10-K 或 10-Q）"""
+    """检测财报类型（10-K / 10-Q / 20-F）"""
     filename_lower = filename.lower()
 
     # 从文件名判断（最可靠）
@@ -469,6 +492,12 @@ def detect_filing_type(filename: str, text: str = None) -> str:
         return "10-K"
     if "10q" in filename_lower or "10-q" in filename_lower:
         return "10-Q"
+    # 特殊分支：外国私人发行人（PDD/BABA 等）申报 20-F
+    if "20f" in filename_lower or "20-f" in filename_lower:
+        return "20-F"
+    # 6-K：外国私人发行人中期申报（盈利公告等），无 dei XBRL 标签
+    if "6k" in filename_lower or "6-k" in filename_lower:
+        return "6-K"
 
     # 从 XBRL 标签判断（最准确）
     if text:
@@ -484,14 +513,20 @@ def detect_filing_type(filename: str, text: str = None) -> str:
         # 检查 DocumentType（更准确）
         doc_type_match = re.search(r'dei:DocumentType[^>]*>(.*?)<', text, re.IGNORECASE)
         if doc_type_match:
-            doc_type = doc_type_match.group(1).strip()
-            if "10-K" in doc_type.upper():
+            doc_type = doc_type_match.group(1).strip().upper()
+            if "20-F" in doc_type:
+                return "20-F"
+            if "10-K" in doc_type:
                 return "10-K"
-            if "10-Q" in doc_type.upper():
+            if "10-Q" in doc_type:
                 return "10-Q"
 
         # 只检查文件开头的 FORM 声明（避免引用其他文件）
         first_5000 = text[:5000]
+        if re.search(r"FORM\s+20-F", first_5000, re.IGNORECASE):
+            return "20-F"
+        if re.search(r"FORM\s+6-K", first_5000, re.IGNORECASE):
+            return "6-K"
         if re.search(r"FORM\s+10-K", first_5000, re.IGNORECASE):
             return "10-K"
         if re.search(r"FORM\s+10-Q", first_5000, re.IGNORECASE):
@@ -508,27 +543,48 @@ def detect_filing_type(filename: str, text: str = None) -> str:
     return "10-Q"  # 默认为 10-Q（大多数是季报）
 
 
-def extract_fiscal_period(filename: str, filing_type: str) -> str:
-    """从文件名提取财年和季度"""
-    # 匹配日期模式：msft-20230630.htm 或 msft-10k_20220630.htm
-    date_match = re.search(r"(\d{8})\.htm", filename)
+# 季度词 → 季度序号（6-K 正文标题回退用）
+_QUARTER_WORDS = {"first": 1, "second": 2, "third": 3, "fourth": 4}
+
+
+def extract_fiscal_period(
+    filename: str,
+    filing_type: str,
+    fy_end_month: int = 12,
+    text: str = None,
+) -> str:
+    """提取财年/季度标签。
+
+    10-Q 季度按公司财年截止月（fy_end_month）推算，而非硬编码 6 月财年：
+      fy = year if month <= fy_end_month else year + 1
+    无 8 位日期的文件（如 PDD 的 6-K 盈利公告 PDD_6K_2026-08-25.htm）
+    回退到正文标题（"Second Quarter 2026 Unaudited Financial Results"）。
+    """
+    # 6-K：文件名无可靠期间信息，正文标题优先
+    if filing_type == "6-K" and text:
+        m = re.search(
+            r"(First|Second|Third|Fourth)\s+Quarter\s+(?:of\s+)?(\d{4})",
+            text[:20000], re.IGNORECASE)
+        if m:
+            q = _QUARTER_WORDS[m.group(1).lower()]
+            return f"{m.group(2)}Q{q}"
+
+    # 匹配日期模式：msft-20230630.htm / msft-10k_20220630.htm / pdd-20251231x20f.htm
+    date_match = re.search(r"(\d{8})[^.]*\.htm", filename)
     if date_match:
         date_str = date_match.group(1)
         year = int(date_str[:4])
         month = int(date_str[4:6])
 
-        if filing_type == "10-K":
+        if filing_type in ("10-K", "20-F"):
             return f"FY{year}"
         else:
-            # 10-Q: 根据月份判断季度
-            if month <= 3:
-                return f"{year}Q3"  # 前一年的 Q3（微软财年）
-            elif month <= 6:
-                return f"{year}Q4"
-            elif month <= 9:
-                return f"{year}Q1"
-            else:
-                return f"{year}Q2"
+            # 10-Q: 报告期末所属财年 + 相对财年末的偏移定季度
+            # 4-4-5 财历（如 PFE 季末 4/3、7/3、10/2）偏移非整月，按最近季度归类
+            fy = year if month <= fy_end_month else year + 1
+            quarter_idx = round(((month - fy_end_month) % 12) / 3) % 4
+            q = {0: 4, 1: 1, 2: 2, 3: 3}[quarter_idx]
+            return f"{fy}Q{q}"
 
     return "Unknown"
 
@@ -542,6 +598,7 @@ def generate_extraction_md(
     cash_flows: Dict,
     detailed_items: Dict,
     force: bool = False,
+    quality_warnings: Optional[List[str]] = None,
 ) -> str:
     """生成提取文件的 Markdown 内容"""
     output_dir = os.path.join(ANALYSIS_DIR, ticker.upper())
@@ -586,7 +643,6 @@ def generate_extraction_md(
         ("debt_to_asset_ratio", "资产负债率"),
         ("current_ratio", "流动比率"),
         ("quick_ratio", "速动比率"),
-        ("net_cash", "净现金"),
         ("interest_coverage", "利息覆盖倍数"),
         ("goodwill_to_assets", "商誉占比"),
         ("roe", "净资产收益率"),
@@ -600,8 +656,13 @@ def generate_extraction_md(
         if key in metrics:
             lines.append(f"| {label} | {metrics[key]} |")
 
-    # 现金流表格
-    lines.append("\n## 现金流\n")
+    # 封面流通股数（原始股数 → 百万股展示，DCF 每股估值兜底数据源）
+    if "shares_outstanding_num" in metrics:
+        lines.append(f"| 流通股数 | {metrics['shares_outstanding_num'] / 1e6:,.1f}M |")
+
+    # 现金流表格（10-Q 现金流量表仅披露 YTD 累计值，需明示口径避免误读为单季）
+    cf_title = "现金流（YTD 累计）" if filing_type == "10-Q" else "现金流"
+    lines.append(f"\n## {cf_title}\n")
     lines.append("| 项目 | 数值 |")
     lines.append("|:---|:---|")
 
@@ -662,9 +723,14 @@ def generate_extraction_md(
         if field_key not in cash_flows:
             missing_cashflows.append(field_label)
 
-    if missing_metrics or missing_cashflows:
+    if missing_metrics or missing_cashflows or quality_warnings:
         lines.append("\n## ⚠️ 数据质量警告\n")
-        lines.append("> 以下必填字段缺失，可能影响分析准确性：\n")
+        lines.append("> 以下字段缺失或数据异常，可能影响分析准确性（异常字段已置空，不做默认值/模拟值）：\n")
+
+        if quality_warnings:
+            for w in quality_warnings:
+                lines.append(f"**数据异常**: {w}")
+                lines.append("")
 
         if missing_metrics:
             lines.append(f"**缺失财务指标**: {', '.join(missing_metrics)}")
@@ -724,8 +790,9 @@ def generate_analysis_report(ticker: str, force: bool = False) -> str:
         return ""
 
     # 分离年报和季报
-    annual = [d for d in all_data if d.get("filing_type") == "10-K"]
-    quarterly = [d for d in all_data if d.get("filing_type") == "10-Q"]
+    # 年报/季报：外国私人发行人用 20-F（年报）与 6-K（中期）替代 10-K/10-Q
+    annual = [d for d in all_data if d.get("filing_type") in ("10-K", "20-F")]
+    quarterly = [d for d in all_data if d.get("filing_type") in ("10-Q", "6-K")]
 
     # 取最新一期的数据用于估值
     latest = all_data[-1]
@@ -741,19 +808,20 @@ def generate_analysis_report(ticker: str, force: bool = False) -> str:
         lines.append("|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|")
         for d in annual:
             period = d.get("fiscal_period", "?")
+            cur = d.get("currency", "$")
             lines.append(
                 f"| {d.get('filing_type', '')}_{period} "
-                f"| {_fmt(d.get('revenue'), 'M')} "
-                f"| {_fmt(d.get('gross_profit'), 'M')} "
+                f"| {_fmt(d.get('revenue'), 'M', cur)} "
+                f"| {_fmt(d.get('gross_profit'), 'M', cur)} "
                 f"| {_fmt(d.get('gross_margin'), '%', '')} "
-                f"| {_fmt(d.get('operating_income'), 'M')} "
+                f"| {_fmt(d.get('operating_income'), 'M', cur)} "
                 f"| {_fmt(d.get('operating_margin'), '%', '')} "
-                f"| {_fmt(d.get('net_income'), 'M')} "
+                f"| {_fmt(d.get('net_income'), 'M', cur)} "
                 f"| {_fmt(d.get('net_margin'), '%', '')} "
-                f"| {_fmt(d.get('eps'))} "
-                f"| {_fmt(d.get('total_assets'), 'M')} "
-                f"| {_fmt(d.get('total_liabilities'), 'M')} "
-                f"| {_fmt(d.get('stockholders_equity'), 'M')} |"
+                f"| {_fmt(d.get('eps'), '', cur)} "
+                f"| {_fmt(d.get('total_assets'), 'M', cur)} "
+                f"| {_fmt(d.get('total_liabilities'), 'M', cur)} "
+                f"| {_fmt(d.get('stockholders_equity'), 'M', cur)} |"
             )
 
         # 3年 CAGR
@@ -800,16 +868,17 @@ def generate_analysis_report(ticker: str, force: bool = False) -> str:
         lines.append("|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|")
         for d in quarterly:
             period = d.get("fiscal_period", "?")
+            cur = d.get("currency", "$")
             lines.append(
                 f"| {d.get('filing_type', '')}_{period} "
-                f"| {_fmt(d.get('revenue'), 'M')} "
-                f"| {_fmt(d.get('gross_profit'), 'M')} "
+                f"| {_fmt(d.get('revenue'), 'M', cur)} "
+                f"| {_fmt(d.get('gross_profit'), 'M', cur)} "
                 f"| {_fmt(d.get('gross_margin'), '%', '')} "
-                f"| {_fmt(d.get('operating_income'), 'M')} "
+                f"| {_fmt(d.get('operating_income'), 'M', cur)} "
                 f"| {_fmt(d.get('operating_margin'), '%', '')} "
-                f"| {_fmt(d.get('net_income'), 'M')} "
+                f"| {_fmt(d.get('net_income'), 'M', cur)} "
                 f"| {_fmt(d.get('net_margin'), '%', '')} "
-                f"| {_fmt(d.get('eps'))} |"
+                f"| {_fmt(d.get('eps'), '', cur)} |"
             )
         lines.append("")
 
@@ -855,14 +924,15 @@ def generate_analysis_report(ticker: str, force: bool = False) -> str:
         lines.append("|:---|:---:|:---:|:---:|:---:|:---:|:---:|")
         for d in annual:
             period = d.get("fiscal_period", "?")
+            cur = d.get("currency", "$")
             lines.append(
                 f"| {d.get('filing_type', '')}_{period} "
-                f"| {_fmt(d.get('operating_cf'), 'M')} "
-                f"| {_fmt(d.get('investing_cf'), 'M')} "
-                f"| {_fmt(d.get('financing_cf'), 'M')} "
-                f"| {_fmt(d.get('capex'), 'M')} "
-                f"| {_fmt(d.get('depreciation_amortization'), 'M')} "
-                f"| {_fmt(d.get('free_cash_flow'), 'M')} |"
+                f"| {_fmt(d.get('operating_cf'), 'M', cur)} "
+                f"| {_fmt(d.get('investing_cf'), 'M', cur)} "
+                f"| {_fmt(d.get('financing_cf'), 'M', cur)} "
+                f"| {_fmt(d.get('capex'), 'M', cur)} "
+                f"| {_fmt(d.get('depreciation_amortization'), 'M', cur)} "
+                f"| {_fmt(d.get('free_cash_flow'), 'M', cur)} |"
             )
         lines.append("")
 

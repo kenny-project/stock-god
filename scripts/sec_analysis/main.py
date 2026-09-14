@@ -13,7 +13,7 @@ from typing import Optional
 
 from .sec_10k import Sec10KAnalyzer
 from .sec_10q import Sec10QAnalyzer
-from .extraction import extract_key_metrics, extract_cash_flows, extract_detailed_profit_items
+from .extraction import extract_key_metrics, extract_cash_flows, extract_detailed_profit_items, validate_metrics
 from .report import (
     detect_filing_type,
     extract_fiscal_period,
@@ -33,6 +33,12 @@ def get_analyzer(filing_type: str):
         return Sec10KAnalyzer()
     elif filing_type == "10-Q":
         return Sec10QAnalyzer()
+    elif filing_type == "20-F":
+        # 特殊分支：外国私人发行人年报，结构与 10-K 相近（Item 3 风险/Item 5 经营讨论/财务报表），复用 10-K 分析器
+        return Sec10KAnalyzer()
+    elif filing_type == "6-K":
+        # 特殊分支：外国私人发行人中期申报（盈利公告），财务报表结构与 10-Q 相近，复用 10-Q 分析器
+        return Sec10QAnalyzer()
     else:
         raise ValueError(f"不支持的财报类型: {filing_type}")
 
@@ -41,6 +47,7 @@ def analyze_single_filing(
     ticker: str,
     htm_path: str,
     force: bool = False,
+    fy_end_month: int = 12,
 ) -> Optional[str]:
     """分析单个财报文件"""
     filename = os.path.basename(htm_path)
@@ -58,9 +65,15 @@ def analyze_single_filing(
     filing_type = detect_filing_type(filename, html_content)
     print(f"   类型: {filing_type}")
 
-    # 提取财年/季度
-    fiscal_period = extract_fiscal_period(filename, filing_type)
+    # 提取财年/季度（按公司财年截止月推算；无日期文件用正文回退）
+    fiscal_period = extract_fiscal_period(filename, filing_type,
+                                          fy_end_month=fy_end_month,
+                                          text=html_content)
     print(f"   期间: {fiscal_period}")
+    if fiscal_period == "Unknown":
+        # 无法确定期间（如非盈利公告的 6-K），不落盘避免撞名覆盖
+        print("   ⚠️  无法确定财期，跳过分析")
+        return None
 
     # 获取对应的分析器
     analyzer = get_analyzer(filing_type)
@@ -82,8 +95,10 @@ def analyze_single_filing(
         else:
             print(f"   ⚠️  未找到 {section_type}")
 
-    # 提取关键指标
-    metrics = extract_key_metrics(text)
+    # 提取关键指标（传入 HTML 以启用 iXBRL 结构化提取，避免文本正则抓错会计期；
+    # 10-Q 场景收益表取单季 context，避免 YTD 累计值冒充单季）
+    metrics = extract_key_metrics(text, html_content,
+                                  quarterly=(filing_type == "10-Q"))
     if metrics:
         print(f"   ✅ 找到 {len(metrics)} 个关键指标")
 
@@ -122,6 +137,13 @@ def analyze_single_filing(
             cash_flows["capex_to_revenue"] = f"{capex_to_rev:.1f}%"
             cash_flows["capex_to_revenue_num"] = capex_to_rev
 
+    # ====== 数据质量校验 ======
+    # 获取失败的字段保持缺失；提取异常（超出合理范围）的字段置空并告警，
+    # 不做默认值/模拟值——财务数据必须真实
+    quality_warnings = validate_metrics(metrics, cash_flows)
+    for w in quality_warnings:
+        print(f"   ⚠️  数据质量: {w}")
+
     # 生成提取文件
     output_path = generate_extraction_md(
         ticker=ticker,
@@ -132,14 +154,48 @@ def analyze_single_filing(
         cash_flows=cash_flows,
         detailed_items=detailed_items,
         force=force,
+        quality_warnings=quality_warnings,
     )
 
     print(f"   📁 输出: {output_path}")
     return output_path
 
 
+def _filing_date(path: str) -> str:
+    """从文件名提取 8 位日期（如 msft-20260630.htm -> 20260630），无日期返回占位值"""
+    m = re.search(r"(\d{8})", os.path.basename(path))
+    return m.group(1) if m else "00000000"
+
+
+def sort_filing_files(files: list) -> list:
+    """按文件名中的日期降序排序（最新在前），无日期的排在最后"""
+    return sorted(files, key=lambda p: (_filing_date(p), p), reverse=True)
+
+
+def _detect_form(path: str) -> str:
+    """检测单个财报文件的表单类型（先看文件名，再看 XBRL 内容）"""
+    filename = os.path.basename(path)
+    filename_lower = filename.lower()
+    if "10k" in filename_lower or "10-k" in filename_lower:
+        return "10-K"
+    if "10q" in filename_lower or "10-q" in filename_lower:
+        return "10-Q"
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            html = f.read()
+    except OSError:
+        return "unknown"
+    return detect_filing_type(filename, html)
+
+
+def filter_files_by_form(files: list, form: str) -> list:
+    """按表单类型过滤财报文件（内容级判断，而非文件名子串匹配）"""
+    form_types = [f.strip().upper() for f in form.split(",")]
+    return [f for f in files if _detect_form(f) in form_types]
+
+
 def find_filing_files(ticker: str) -> list:
-    """查找所有 .htm 文件"""
+    """查找所有 .htm 文件（按日期降序，最新在前）"""
     ticker_dir = os.path.join(REPORTS_DIR, ticker.upper())
     if not os.path.exists(ticker_dir):
         print(f"❌ 目录不存在: {ticker_dir}")
@@ -150,7 +206,21 @@ def find_filing_files(ticker: str) -> list:
         if f.endswith(".htm") and not f.endswith("_index.html"):
             files.append(os.path.join(ticker_dir, f))
 
-    return sorted(files)
+    return sort_filing_files(files)
+
+
+def _fy_end_month_from_files(files: list) -> int:
+    """从最新年报（10-K/20-F）文件名的报告期末推算财年截止月，找不到年报默认 12 月"""
+    best_path = None
+    best_date = ""
+    for p in files:
+        if _detect_form(p) not in ("10-K", "20-F"):
+            continue
+        d = _filing_date(p)
+        if d > best_date:
+            best_date, best_path = d, p
+    m = re.search(r"\d{4}(\d{2})", os.path.basename(best_path)) if best_path else None
+    return int(m.group(1)) if m else 12
 
 
 def analyze_ticker(
@@ -172,16 +242,14 @@ def analyze_ticker(
         print("❌ 未找到财报文件")
         return
 
+    # 财年截止月：从最新年报文件推算（如 MSFT=6、AAPL=9、NKE=5）
+    fy_end_month = _fy_end_month_from_files(files)
+
     print(f"\n📁 找到 {len(files)} 个财报文件")
 
-    # 过滤表单类型
+    # 过滤表单类型（基于文件名+XBRL内容判断，而非文件名子串）
     if form:
-        form_types = [f.strip().upper() for f in form.split(",")]
-        # 支持多种文件名格式：10-K, 10k, 10_k
-        files = [f for f in files if any(
-            ft.replace("-", "") in os.path.basename(f).upper().replace("-", "").replace("_", "")
-            for ft in form_types
-        )]
+        files = filter_files_by_form(files, form)
         print(f"📋 过滤后: {len(files)} 个 {form} 文件")
 
     # 根据参数选择要分析的文件
@@ -197,17 +265,17 @@ def analyze_ticker(
             return
         files = [target_file]
     elif latest:
-        # 只分析最新的
-        files = [files[-1]]
+        # 只分析最新的（sort_filing_files 已按日期降序）
+        files = [files[0]]
     elif not all_files:
         # 默认只分析最新的
-        files = [files[-1]]
+        files = [files[0]]
 
     print(f"\n🔍 将分析 {len(files)} 个文件\n")
 
     # 分析每个文件
     for f in files:
-        analyze_single_filing(ticker, f, force=force)
+        analyze_single_filing(ticker, f, force=force, fy_end_month=fy_end_month)
 
     # 生成聚合分析报告
     if len(files) > 1 or all_files:

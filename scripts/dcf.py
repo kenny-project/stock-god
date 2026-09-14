@@ -17,11 +17,12 @@ Owner Earnings = 净利润 + 折旧摊销 - 维护性资本支出
 """
 
 import argparse
-import importlib.util
 import os
 import re
 import sys
 from datetime import datetime
+
+from common import QuoteSource
 
 # 目录配置
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -30,46 +31,13 @@ REPORTS_DIR = os.path.join(PROJECT_ROOT, "reports")
 
 
 # ── 数据获取 ────────────────────────────────────────────
-
-def get_futu_snapshot(ticker):
-    """从 Futu OpenD 获取实时行情快照"""
-    try:
-        futuapi_path = os.path.expanduser("~/.openclaw/skills/futuapi/scripts/common.py")
-        spec = importlib.util.spec_from_file_location("_fc", futuapi_path)
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules["_fc"] = mod
-        spec.loader.exec_module(mod)
-
-        ctx = mod.create_quote_context()
-        try:
-            symbol = ticker.split(".")[-1] if "." in ticker else ticker
-            if not symbol.startswith("US.") and not symbol.startswith("HK."):
-                symbol = f"US.{symbol}"
-
-            ret, data = ctx.get_market_snapshot([symbol])
-            if ret != 0 or data is None or data.empty:
-                return None
-
-            row = data.iloc[0]
-            return {
-                "name": str(row.get("name", "")),
-                "price": float(row.get("last_price", 0) or 0),
-                "marketCap": float(row.get("total_market_val", 0) or 0),
-                "sharesOutstanding": float(row.get("outstanding_shares", 0) or 0),
-                "pe": float(row.get("pe_ttm_ratio", 0) or 0),
-                "pb": float(row.get("pb_ratio", 0) or 0),
-            }
-        finally:
-            mod.safe_close(ctx)
-    except Exception as e:
-        print(f"  ⚠️  Futu 获取行情失败: {e}")
-        return None
+# 行情统一走 common.QuoteSource（Futu → 腾讯财经 fallback），契约见 common.py
 
 
 # ── SEC 分析数据读取 ────────────────────────────────────
 
-def read_sec_analysis(ticker):
-    """从 sec_analysis 提取的 .md 文件中读取历史财务数据"""
+def _read_sec_records(ticker):
+    """从 sec_analysis 提取的 .md 文件中读取全部年报/季报记录"""
     # 去掉市场前缀（如 US.NKE -> NKE）
     symbol = ticker.split(".")[-1].upper() if "." in ticker else ticker.upper()
     analysis_dir = os.path.join(ANALYSIS_DIR, symbol)
@@ -87,7 +55,16 @@ def read_sec_analysis(ticker):
         except Exception:
             continue
 
-        record = {"source": md_file, "type": "10-K" if "10-K" in md_file else "10-Q"}
+        record = {"source": md_file, "type": "10-Q"}
+        # 表单类型：20-F（外国发行人年报）等同 10-K 年报口径；6-K 为中期申报
+        if "20-F" in md_file:
+            record["form"], record["type"] = "20-F", "10-K"
+        elif "6-K" in md_file:
+            record["form"], record["type"] = "6-K", "10-Q"
+        elif "10-K" in md_file:
+            record["form"], record["type"] = "10-K", "10-K"
+        else:
+            record["form"], record["type"] = "10-Q", "10-Q"
 
         # 提取期间（优先从文件名提取，如 10-K_FY2025.md -> FY2025）
         period_match = re.search(r"_(\w+)\.md$", md_file)
@@ -99,69 +76,130 @@ def read_sec_analysis(ticker):
             if title_match:
                 record["period"] = title_match.group(1)
 
-        # 提取财务数据
+        # 提取财务数据。金额兼容 $/¥ 前缀（RMB 报告如 PDD 用 ¥），括号表示负数
+        def _money(label, da=False):
+            pattern = rf"\|\s*{label}\s*\|\s*(\()?[$¥]?([\d,]+)M?(?:\))?\s*\|"
+            m = re.search(pattern, content)
+            if not m:
+                return None
+            val = int(m.group(2).replace(",", ""))
+            return -val if m.group(1) else val
+
         # 营收
-        rev_match = re.search(r"\|\s*营收\s*\|\s*\$?([\d,]+)M?\s*\|", content)
-        if rev_match:
-            record["revenue"] = int(rev_match.group(1).replace(",", ""))
-
+        record["revenue"] = _money(r"营收") or 0
         # 净利润
-        ni_match = re.search(r"\|\s*净利润\s*\|\s*\$?([\d,]+)M?\s*\|", content)
-        if ni_match:
-            record["net_income"] = int(ni_match.group(1).replace(",", ""))
-
+        record["net_income"] = _money(r"净利润")
         # 营业利润
-        oi_match = re.search(r"\|\s*营业利润\s*\|\s*\$?([\d,]+)M?\s*\|", content)
-        if oi_match:
-            record["operating_income"] = int(oi_match.group(1).replace(",", ""))
-
-        # 自由现金流
-        fcf_match = re.search(r"\|\s*自由现金流\s*\|\s*(?:\()?\$?([\d,]+)M?(?:\))?\s*\|", content)
-        if fcf_match:
-            val = int(fcf_match.group(1).replace(",", ""))
-            if "($" in content.split("自由现金流")[1][:30]:
-                val = -val
-            record["fcf"] = val
-
-        # 经营现金流
-        cfo_match = re.search(r"\|\s*经营现金流\s*\|\s*(?:\()?\$?([\d,]+)M?(?:\))?\s*\|", content)
-        if cfo_match:
-            val = int(cfo_match.group(1).replace(",", ""))
-            if "($" in content.split("经营现金流")[1][:30]:
-                val = -val
-            record["cfo"] = val
-
-        # 折旧/摊销（兼容 "折旧/摊销" 和 "折旧摊销"，数值可能带括号表示负数）
-        da_match = re.search(r"\|\s*折旧/?摊销\s*\|\s*(?:\()?\$?([\d,]+)M?(?:\))?\s*\|", content)
-        if da_match:
-            record["depreciation"] = int(da_match.group(1).replace(",", ""))
-
-        # 资本支出 (CapEx)，数值可能带括号表示负数如 ($430M)
-        capex_match = re.search(r"\|\s*资本支出\s*\|\s*(?:\()?\$?([\d,]+)M?(?:\))?\s*\|", content)
-        if capex_match:
-            record["capex"] = int(capex_match.group(1).replace(",", ""))
-
-        # 总资产
-        ta_match = re.search(r"\|\s*总资产\s*\|\s*\$?([\d,]+)M?\s*\|", content)
-        if ta_match:
-            record["total_assets"] = int(ta_match.group(1).replace(",", ""))
-
-        # 股东权益
-        eq_match = re.search(r"\|\s*股东权益\s*\|\s*\$?([\d,]+)M?\s*\|", content)
-        if eq_match:
-            record["equity"] = int(eq_match.group(1).replace(",", ""))
-
+        record["operating_income"] = _money(r"营业利润(?!率)")
+        # 自由现金流 / 经营现金流 / 折旧摊销 / 资本支出
+        record["fcf"] = _money(r"自由现金流")
+        record["cfo"] = _money(r"经营现金流")
+        record["depreciation"] = _money(r"折旧/?摊销")
+        record["capex"] = _money(r"资本支出")
+        # 总资产 / 股东权益
+        record["total_assets"] = _money(r"总资产")
+        record["equity"] = _money(r"股东权益")
+        # 封面流通股数（百万股，非货币金额不能用 _money）
+        sh_match = re.search(r"\|\s*流通股数\s*\|\s*([\d,]+(?:\.\d+)?)M\s*\|", content)
+        if sh_match:
+            record["shares_outstanding"] = float(sh_match.group(1).replace(",", ""))
         # EPS
-        eps_match = re.search(r"\|\s*每股收益.*?\|\s*\$?([\d.]+)\s*\|", content)
+        eps_match = re.search(r"\|\s*每股收益.*?\|\s*[$¥]?([\d.]+)\s*\|", content)
         if eps_match:
             record["eps"] = float(eps_match.group(1))
+
+        # 币种（RMB 报告如 PDD 用 ¥，报告输出沿用原币种）
+        if "¥" in content:
+            record["currency"] = "¥"
 
         if record.get("revenue") or record.get("net_income"):
             history.append(record)
 
-    # 只保留年报数据（10-K），用于 DCF 计算
-    annual = [h for h in history if h.get("type") == "10-K"]
-    return annual
+    return history
+
+
+def read_sec_analysis(ticker):
+    """年报记录（10-K/20-F）：DCF 历史数据与 CAGR 估算"""
+    return [h for h in _read_sec_records(ticker) if h.get("type") == "10-K"]
+
+
+def read_sec_quarterly(ticker):
+    """季报记录（10-Q/6-K）：TTM 基期构造，消除年报滞后"""
+    return [h for h in _read_sec_records(ticker) if h.get("type") == "10-Q"]
+
+
+# 现金流量表科目（10-Q 披露的是 YTD 累计，TTM 公式与利润表科目不同）
+_CF_METRICS = ("cfo", "capex", "depreciation", "fcf")
+_TTM_FLOW_METRICS = ("revenue", "net_income", "operating_income") + _CF_METRICS
+
+
+def _parse_fyq(period):
+    """"2026Q2" -> (2026, 2)；其余返回 None"""
+    m = re.match(r"^(\d{4})Q([1-4])$", str(period))
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def compute_ttm(annual, quarterly):
+    """由最新年报 + 年后季报构造 TTM（未来十二个月已实现的滚动值）
+
+    TTM = 最新年报 + 年后季度 − 上年同期季度，消除"只用年报"造成的滞后：
+      - 利润表科目（10-Q/6-K 均为单季值）: 逐年滚动求和
+      - 现金流科目在 10-Q 中为 YTD 累计: TTM = 年报 + 最新YTD − 上年同期YTD
+      - 现金流科目在 6-K 中为单季值: 与利润表同公式
+    任一成分缺失则该指标不输出 TTM（财务数据不可造假），由调用方回退年报基期。
+
+    返回 {metric: ttm_value, "base_period": "TTM 截至 2026Q3"}；无年后季报返回 {}。
+    """
+    if not annual:
+        return {}
+    latest = max(annual, key=lambda r: str(r.get("period", "")))
+    m = re.search(r"(\d{4})", str(latest.get("period", "")))
+    if not m:
+        return {}
+    fy = int(m.group(1))
+
+    after, prior = {}, {}  # 年后季度 / 年报自身财年的同期季度
+    for r in quarterly:
+        fyq = _parse_fyq(r.get("period", ""))
+        if not fyq:
+            continue
+        y, q = fyq
+        if y == fy + 1:
+            after[q] = r
+        elif y == fy:
+            prior[q] = r
+    if not after:
+        return {}
+
+    ttm = {}
+    for metric in _TTM_FLOW_METRICS:
+        a_val = latest.get(metric)
+        if a_val is None:
+            continue
+        if metric in _CF_METRICS and all(r.get("form") == "10-Q" for r in after.values()):
+            # 10-Q 现金流为 YTD 累计：取期末最新一份与上年同期一份
+            q_latest = max(after)
+            prior_rec = prior.get(q_latest)
+            if prior_rec is None or prior_rec.get(metric) is None:
+                continue
+            ttm[metric] = a_val + after[q_latest][metric] - prior_rec[metric]
+        else:
+            # 单季值滚动求和（现金流科目仅当全部为 6-K 单季披露时适用）
+            if metric in _CF_METRICS and not all(r.get("form") == "6-K" for r in after.values()):
+                continue
+            total = a_val
+            for q, r in after.items():
+                prior_rec = prior.get(q)
+                if prior_rec is None or prior_rec.get(metric) is None:
+                    total = None
+                    break
+                total += r[metric] - prior_rec[metric]
+            if total is not None:
+                ttm[metric] = total
+
+    if ttm:
+        ttm["base_period"] = f"TTM 截至 {fy + 1}Q{max(after)}"
+    return ttm
 
 
 # ── 数据验证 ────────────────────────────────────────────
@@ -298,6 +336,33 @@ def calculate_owner_earnings(net_income, depreciation, maintenance_capex):
     注：维护性资本支出 ≈ 总资本支出 × 60%（经验值，维持现有业务所需的最低资本支出）
     """
     return net_income + depreciation - maintenance_capex
+
+
+def owner_earnings_for_record(net_income, depreciation, capex, fcf):
+    """单期 Owner Earnings。
+
+    capex 在提取文件中为负数（现金流出，如 "资本支出 | ($1,192M)"），
+    统一取绝对值，避免符号约定导致公式被跳过而静默回退 FCF。
+
+    返回 (owner_earnings, maintenance_capex)；折旧或 capex 缺失时回退 FCF（宁缺勿错）。
+    """
+    dep = depreciation or 0
+    capex_abs = abs(capex or 0)
+    if dep > 0 and capex_abs > 0:
+        maintenance = capex_abs * 0.6
+        return calculate_owner_earnings(net_income, dep, maintenance), maintenance
+    return (fcf if fcf and fcf > 0 else 0), 0
+
+
+def latest_cover_shares(quarterly_data, sec_data):
+    """封面流通股数兜底：最新季报封面 > 最新年报封面（百万股）。
+
+    返回 (shares, period)；全部缺失返回 (None, None)。
+    """
+    for rec in list(reversed(quarterly_data)) + list(reversed(sec_data)):
+        if rec.get("shares_outstanding"):
+            return rec["shares_outstanding"], rec.get("period")
+    return None, None
 
 
 def estimate_growth_rate(historical_fcf, historical_revenue=None):
@@ -452,9 +517,15 @@ def dcf_valuation(
 
 def sensitivity_analysis(
     base_owner_earnings, shares_outstanding, current_price,
-    growth_rates, discount_rates, terminal_growth_rate, projection_years
+    growth_rates, discount_rates, terminal_growth_rate, projection_years,
+    currency="$",
 ):
-    """敏感性分析：不同增长率 × 折现率下的每股内在价值"""
+    """敏感性分析：不同增长率 × 折现率下的内在价值
+
+    有流通股数时输出每股内在价值；无股数（如无行情）时输出企业内在价值（M），
+    不除股数——不得输出 0（财务数据不可造假）。
+    """
+    has_shares = shares_outstanding and shares_outstanding > 0
     table = []
     for g in growth_rates:
         row = {"growth": f"{g*100:.0f}%"}
@@ -469,9 +540,12 @@ def sensitivity_analysis(
             )
             if "error" in result:
                 row[f"r_{r*100:.0f}%"] = "N/A"
-            else:
+            elif has_shares:
                 val = result.get("intrinsic_value_per_share", 0)
-                row[f"r_{r*100:.0f}%"] = f"${val:.0f}"
+                row[f"r_{r*100:.0f}%"] = f"{currency}{val:.0f}"
+            else:
+                val = result.get("intrinsic_value", 0)
+                row[f"r_{r*100:.0f}%"] = f"{currency}{val:,.0f}M"
         table.append(row)
     return table
 
@@ -484,6 +558,8 @@ def generate_report(ticker, dcf_result, sensitivity, owner_earnings_data, quote,
 
     symbol = ticker.split(".")[-1] if "." in ticker else ticker
     company_name = quote.get("name", symbol) if quote else symbol
+    cur = params.get("currency", "$")
+    base_note = params.get("base_period", "最近一年的 Owner Earnings")
 
     lines.append(f"# {company_name} ({ticker}) DCF 估值分析")
     lines.append("")
@@ -520,12 +596,12 @@ def generate_report(ticker, dcf_result, sensitivity, owner_earnings_data, quote,
         lines.append("| 年度 | 净利润 | 折旧摊销 | 维护CapEx | Owner Earnings | 营收 | FCF |")
         lines.append("|:---|:---:|:---:|:---:|:---:|:---:|:---:|")
         for d in owner_earnings_data:
-            ni = f"${d['net_income']:,.0f}M" if d.get("net_income") is not None else "-"
-            dep = f"${d['depreciation']:,.0f}M" if d.get("depreciation") is not None else "-"
-            mcapex = f"${d['maintenance_capex']:,.0f}M" if d.get("maintenance_capex") is not None else "-"
-            oe = f"${d['owner_earnings']:,.0f}M" if d.get("owner_earnings") is not None else "-"
-            rev = f"${d['revenue']:,.0f}M" if d.get("revenue") is not None else "-"
-            fcf = f"${d['fcf']:,.0f}M" if d.get("fcf") is not None else "-"
+            ni = f"{cur}{d['net_income']:,.0f}M" if d.get("net_income") is not None else "-"
+            dep = f"{cur}{d['depreciation']:,.0f}M" if d.get("depreciation") is not None else "-"
+            mcapex = f"{cur}{d['maintenance_capex']:,.0f}M" if d.get("maintenance_capex") is not None else "-"
+            oe = f"{cur}{d['owner_earnings']:,.0f}M" if d.get("owner_earnings") is not None else "-"
+            rev = f"{cur}{d['revenue']:,.0f}M" if d.get("revenue") is not None else "-"
+            fcf = f"{cur}{d['fcf']:,.0f}M" if d.get("fcf") is not None else "-"
             lines.append(f"| {d.get('year', '-')} | {ni} | {dep} | {mcapex} | {oe} | {rev} | {fcf} |")
         lines.append("")
     else:
@@ -537,7 +613,7 @@ def generate_report(ticker, dcf_result, sensitivity, owner_earnings_data, quote,
     lines.append("")
     lines.append("| 参数 | 数值 | 说明 |")
     lines.append("|:---|:---:|:---|")
-    lines.append(f"| 基期 Owner Earnings | ${dcf_result['base_earnings']:,.0f}M | 最近一年的 Owner Earnings |")
+    lines.append(f"| 基期 Owner Earnings | {cur}{dcf_result['base_earnings']:,.0f}M | {base_note} |")
     lines.append(f"| 预测增长率 | {dcf_result['growth_rate']*100:.1f}% | 基于历史数据估算 |")
     lines.append(f"| 折现率 (WACC) | {dcf_result['discount_rate']*100:.1f}% | 巴菲特通常使用 10% |")
     lines.append(f"| 永续增长率 | {dcf_result['terminal_growth']*100:.1f}% | 长期 GDP 增速附近 |")
@@ -545,7 +621,7 @@ def generate_report(ticker, dcf_result, sensitivity, owner_earnings_data, quote,
     lines.append("")
 
     # ── 预测现金流 ──
-    lines.append("## 预测现金流（百万美元）")
+    lines.append(f"## 预测现金流（百万{cur}）")
     lines.append("")
     if dcf_result.get("projections"):
         lines.append("| 年份 | 预测 Owner Earnings | 折现值 | 累计折现值 |")
@@ -553,9 +629,9 @@ def generate_report(ticker, dcf_result, sensitivity, owner_earnings_data, quote,
         for p in dcf_result["projections"]:
             lines.append(
                 f"| 第{p['year']}年 "
-                f"| ${p['projected_earnings']:,.0f} "
-                f"| ${p['present_value']:,.0f} "
-                f"| ${p['cumulative_pv']:,.0f} |"
+                f"| {cur}{p['projected_earnings']:,.0f} "
+                f"| {cur}{p['present_value']:,.0f} "
+                f"| {cur}{p['cumulative_pv']:,.0f} |"
             )
         lines.append("")
 
@@ -564,10 +640,12 @@ def generate_report(ticker, dcf_result, sensitivity, owner_earnings_data, quote,
     lines.append("")
     lines.append("| 项目 | 数值 |")
     lines.append("|:---|:---|")
-    lines.append(f"| 预测期现金流现值合计 | ${dcf_result.get('sum_pv_projections', 0):,.0f}M |")
-    lines.append(f"| 终值 | ${dcf_result.get('terminal_value', 0):,.0f}M |")
-    lines.append(f"| 终值折现 | ${dcf_result.get('terminal_pv', 0):,.0f}M |")
-    lines.append(f"| **企业内在价值** | **${dcf_result.get('intrinsic_value', 0):,.0f}M** |")
+    lines.append(f"| 预测期现金流现值合计 | {cur}{dcf_result.get('sum_pv_projections', 0):,.0f}M |")
+    lines.append(f"| 终值 | {cur}{dcf_result.get('terminal_value', 0):,.0f}M |")
+    lines.append(f"| 终值折现 | {cur}{dcf_result.get('terminal_pv', 0):,.0f}M |")
+    lines.append(f"| **股权内在价值** | **{cur}{dcf_result.get('intrinsic_value', 0):,.0f}M** |")
+    lines.append("")
+    lines.append("> Owner Earnings 基于净利润（已扣除息费用）折现，结果为股权价值近似口径")
     lines.append("")
 
     if dcf_result.get("intrinsic_value_per_share"):
@@ -594,7 +672,10 @@ def generate_report(ticker, dcf_result, sensitivity, owner_earnings_data, quote,
     # ── 敏感性分析 ──
     lines.append("## 敏感性分析")
     lines.append("")
-    lines.append("不同增长率 × 折现率下的每股内在价值：")
+    if dcf_result.get("shares_outstanding", 0) and dcf_result["shares_outstanding"] > 0:
+        lines.append("不同增长率 × 折现率下的每股内在价值：")
+    else:
+        lines.append("不同增长率 × 折现率下的股权内在价值（无流通股数，不除股数）：")
     lines.append("")
 
     if sensitivity:
@@ -616,8 +697,12 @@ def generate_report(ticker, dcf_result, sensitivity, owner_earnings_data, quote,
     lines.append("")
 
     checks = []
-    if dcf_result.get("verdict") in ["严重低估", "低估"]:
+    if not dcf_result.get("current_price"):
+        checks.append(("⚠️", "估值", "未获取市价，无法与每股内在价值对比"))
+    elif dcf_result.get("verdict") in ["严重低估", "低估"]:
         checks.append(("✅", "估值", "内在价值高于当前股价"))
+    elif dcf_result.get("verdict") == "合理估值":
+        checks.append(("✅", "估值", "内在价值与当前股价基本匹配"))
     else:
         checks.append(("❌", "估值", f"当前股价可能偏高（{dcf_result.get('verdict', '-')}）"))
 
@@ -688,22 +773,26 @@ def main():
     print(f"💰 {ticker} 巴菲特式 DCF 估值")
     print(f"{'='*60}\n")
 
-    # ── 1. 获取实时行情 ──
-    print("📊 获取实时行情（Futu）...")
-    quote = get_futu_snapshot(ticker)
+    # ── 1. 获取实时行情（统一接口：Futu → 腾讯财经 fallback）──
+    print("📊 获取实时行情...")
+    quote = QuoteSource().get_snapshot(ticker)
     if quote:
+        print(f"  数据源: {quote.get('source', '?')}")
         print(f"  股价: ${quote.get('price', 0):.2f}")
-        print(f"  市值: ${quote.get('marketCap', 0)/1e9:.1f}B")
+        if quote.get("marketCap"):
+            print(f"  市值: ${quote['marketCap']/1e9:.1f}B")
     else:
-        print("  ⚠️  无法获取行情数据")
+        print("  ⚠️  无法获取行情数据（无现价，仅输出内在价值）")
 
     # ── 2. 从 SEC 分析数据读取历史数据 ──
     print("\n📁 读取 SEC 分析数据...")
     sec_data = read_sec_analysis(ticker)
+    # 货币符号：任一期报存款货币为 ¥（外国发行人 20-F）则全程用 ¥ 展示
+    cur = "¥" if any(d.get("currency") == "¥" for d in sec_data) else "$"
     if sec_data:
         print(f"  找到 {len(sec_data)} 期年报数据")
         for d in sec_data:
-            print(f"    {d.get('period', '?')}: 营收=${d.get('revenue', 0):,}M, 净利润=${d.get('net_income', 0):,}M")
+            print(f"    {d.get('period', '?')}: 营收={cur}{d.get('revenue', 0):,}M, 净利润={cur}{d.get('net_income', 0):,}M")
     else:
         print("  ⚠️  未找到 SEC 分析数据")
 
@@ -727,18 +816,14 @@ def main():
         period = d.get("period", "?")
         ni = d.get("net_income", 0)
         revenue = d.get("revenue", 0)
-        depreciation = d.get("depreciation", 0)
-        capex = d.get("capex", 0)
-        fcf = d.get("fcf", 0)
         cfo = d.get("cfo", 0)
 
-        # 计算 Owner Earnings
-        if depreciation > 0 and capex > 0:
-            maintenance_capex = capex * 0.6
-            owner_earnings = calculate_owner_earnings(ni, depreciation, maintenance_capex)
-        else:
-            maintenance_capex = 0
-            owner_earnings = fcf if fcf > 0 else 0
+        # 计算 Owner Earnings（capex 为负数流出表示，函数内统一取绝对值）
+        owner_earnings, maintenance_capex = owner_earnings_for_record(
+            ni, d.get("depreciation"), d.get("capex"), d.get("fcf"))
+        depreciation = d.get("depreciation") or 0
+        capex = d.get("capex") or 0
+        fcf = d.get("fcf") or 0
 
         owner_earnings_data.append({
             "year": period,
@@ -756,7 +841,7 @@ def main():
         print(f"  数据来源: SEC")
         print(f"  计算了 {len(owner_earnings_data)} 期 Owner Earnings")
         for d in owner_earnings_data:
-            print(f"    {d.get('year', '?')}: Owner Earnings = ${d.get('owner_earnings', 0):,.0f}M")
+            print(f"    {d.get('year', '?')}: Owner Earnings = {cur}{d.get('owner_earnings', 0):,.0f}M")
     else:
         print("  ❌ 无法计算 Owner Earnings，数据不足")
         sys.exit(1)
@@ -782,20 +867,54 @@ def main():
     terminal_growth = args.terminal_growth / 100
 
     # ── 6. DCF 估值 ──
-    # 取最新一年的 Owner Earnings 作为基期（反转后索引 0 为最早，-1 为最新）
+    # 基期优先用 TTM（最新年报 + 年后季报滚动），年报滞后最多 3 个季度；
+    # TTM 成分缺失时回退最新年报
+    quarterly_data = read_sec_quarterly(ticker)
+    if quarterly_data:
+        print(f"\n📅 读取 {len(quarterly_data)} 期季报数据（用于 TTM 基期）")
     base_oe = owner_earnings_data[-1]["owner_earnings"]
+    base_oe_note = "最新年报的 Owner Earnings"
+    ttm = compute_ttm(sec_data, quarterly_data)
+    if ttm.get("net_income") is not None:
+        # capex TTM 为负数流出表示，取绝对值
+        t_dep = ttm.get("depreciation") or 0
+        t_capex = abs(ttm.get("capex") or 0)
+        if t_dep > 0 and t_capex > 0:
+            base_oe = calculate_owner_earnings(ttm["net_income"], t_dep, t_capex * 0.6)
+            base_oe_note = f"{ttm['base_period']}（年报+季报滚动）"
+        elif (ttm.get("fcf") or 0) > 0:
+            base_oe = ttm["fcf"]
+            base_oe_note = f"{ttm['base_period']}（FCF 口径）"
+
+    # 流通股数：Futu 优先，无行情时用 SEC 财报封面股数兜底（最新季报封面 > 最新年报封面）
     shares_outstanding = (quote.get("sharesOutstanding", 0) or 0) / 1e6 if quote else 0
     current_price = quote.get("price", 0) if quote else 0
 
     if shares_outstanding == 0 and quote and quote.get("marketCap") and current_price > 0:
         shares_outstanding = quote["marketCap"] / current_price / 1e6
 
+    if shares_outstanding == 0:
+        cover_shares, cover_period = latest_cover_shares(quarterly_data, sec_data)
+        if cover_shares:
+            shares_outstanding = cover_shares
+            print(f"  ℹ️  流通股数来自 SEC 封面（{cover_period}）: {cover_shares:,.1f}M")
+
+    # PDD 等 ¥ 报表公司：美股 ADS 报价为美元，每股价值未做汇率换算
+    if cur == "¥" and shares_outstanding > 0:
+        fx_warn = ("财报为人民币（¥）口径，美股 ADS 报价为美元（$）；"
+                   "每股内在价值为 ¥/ADS 口径，未做汇率换算，与市价直接比较前需自行换算")
+        print(f"  ⚠️  {fx_warn}")
+        warnings.append(fx_warn)
+
     print(f"\n🔮 DCF 估值计算...")
-    print(f"  基期 Owner Earnings: ${base_oe:,.0f}M")
+    print(f"  基期 Owner Earnings: {cur}{base_oe:,.0f}M")
+    print(f"  基期口径: {base_oe_note}")
     print(f"  增长率: {growth_rate*100:.1f}%")
     print(f"  折现率: {discount_rate*100:.1f}%")
     print(f"  永续增长率: {terminal_growth*100:.1f}%")
     print(f"  预测年数: {args.years}年")
+    if shares_outstanding > 0:
+        print(f"  流通股数: {shares_outstanding:,.1f}M")
 
     dcf_result = dcf_valuation(
         base_oe, growth_rate, discount_rate, terminal_growth,
@@ -807,12 +926,15 @@ def main():
         sys.exit(1)
 
     print(f"\n📊 估值结果:")
-    print(f"  企业内在价值: ${dcf_result['intrinsic_value']:,.0f}M")
+    print(f"  股权内在价值: {cur}{dcf_result['intrinsic_value']:,.0f}M")
     if dcf_result.get("intrinsic_value_per_share"):
-        print(f"  每股内在价值: ${dcf_result['intrinsic_value_per_share']:.2f}")
-        print(f"  当前股价: ${current_price:.2f}")
-        print(f"  上行空间: {dcf_result.get('upside_pct', 0):.1f}%")
-        print(f"  判断: {dcf_result.get('verdict', '-')}")
+        print(f"  每股内在价值: {cur}{dcf_result['intrinsic_value_per_share']:.2f}")
+        if current_price > 0:
+            print(f"  当前股价: ${current_price:.2f}")
+            print(f"  上行空间: {dcf_result.get('upside_pct', 0):.1f}%")
+            print(f"  判断: {dcf_result.get('verdict', '-')}")
+        else:
+            print(f"  （无现价：合理股价已算出，但无法与市价比较给出判断）")
 
     # ── 7. 敏感性分析 ──
     print(f"\n📊 敏感性分析...")
@@ -823,19 +945,22 @@ def main():
 
     sensitivity = sensitivity_analysis(
         base_oe, shares_outstanding, current_price,
-        growth_rates, discount_rates, terminal_growth, args.years
+        growth_rates, discount_rates, terminal_growth, args.years,
+        currency=cur
     )
 
     # ── 8. 生成报告 ──
     report = generate_report(ticker, dcf_result, sensitivity, owner_earnings_data, quote,
                              {"growth": growth_rate, "discount": discount_rate,
-                              "terminal_growth": terminal_growth, "years": args.years},
+                              "terminal_growth": terminal_growth, "years": args.years,
+                              "currency": cur, "base_period": base_oe_note},
                              data_source="SEC", warnings=warnings)
 
-    # 保存报告
+    # 保存报告（文件名不带日期：每家公司只保留最新一份，重跑直接覆盖；
+    # 报告内容里的生成时间已标明计算日期）
     output_dir = os.path.join(REPORTS_DIR, "dcf")
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f"{ticker}_DCF_{datetime.now().strftime('%Y%m%d')}.md")
+    output_path = os.path.join(output_dir, f"{ticker}_DCF.md")
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(report)

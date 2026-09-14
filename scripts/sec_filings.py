@@ -23,6 +23,10 @@ SEC_COMPANY_TICKERS = "https://www.sec.gov/files/company_tickers.json"
 SEC_ARCHIVES = "https://www.sec.gov/Archives/edgar/data"
 HEADERS = {"User-Agent": "PersonalResearch/1.0 (personal@email.com)", "Accept": "application/json"}
 
+# 年报/季报表单类型（财年分组与完整性校验用）
+ANNUAL_FORMS = {"10-K", "10-K/A", "20-F", "20-F/A"}
+QUARTERLY_FORMS = {"10-Q", "10-Q/A"}
+
 # 常见财报表单类型说明
 FORM_DESCRIPTIONS = {
     "10-K": "年度报告 (Annual Report)",
@@ -137,6 +141,83 @@ def fetch_submissions(cik):
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         print(f"ERROR: 获取 SEC 提交记录超时或网络异常: {e}")
         return None
+
+
+def merge_submissions_pages(data, pages):
+    """合并 submissions 主响应的 recent 与更早的分页记录，返回合并后的扁平记录。
+
+    recent 最多 1000 条；申报频繁的公司（如 GOOGL，内部人 Form 4 很多）的
+    更早记录存放在 data["filings"]["files"] 分页中，忽略会导致目标年份
+    "无匹配财报"。分页记录更早，追加在 recent 之后保持最新在前。"""
+    recent = data["filings"]["recent"]
+    for page in pages:
+        for key, values in page.items():
+            if key in recent and isinstance(recent[key], list) and isinstance(values, list):
+                recent[key].extend(values)
+    return recent
+
+
+def _fetch_all_submissions(cik, max_pages=5):
+    """获取 submissions 全部记录：主响应 + 按需加载更早的分页（覆盖 5 年窗口）"""
+    data = fetch_submissions(cik)
+    if not data:
+        return None
+    files = data.get("filings", {}).get("files", []) or []
+    pages = []
+    for f in files[:max_pages]:
+        url = f"{SEC_API_BASE}/{f['name']}"
+        req = urllib.request.Request(url, headers=HEADERS)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                pages.append(json.loads(resp.read()))
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            print(f"WARNING: 获取提交记录分页失败({f['name']}): {e}")
+            break
+    return merge_submissions_pages(data, pages)
+
+
+def group_filings_by_fiscal_year(forms, filing_dates, report_dates, years=5, include_forms=None):
+    """按财年分组财报，返回 {财年: [记录索引]}（索引按最新在前排序）
+
+    - 锚定最新一份年报的 reportDate 财年，向前推 years-1 年（如最新 10-K 为
+      FY2026，则窗口为 FY2022..FY2026），保证每个财年恰有 1 份年报 + 3 份季报
+    - 财年归属由 reportDate（报告期截止日）+ 财年截止月决定，与申报日无关：
+      财年 Q1 常在上一日历年申报（如 MSFT FY2022 Q1 于 2021-10 申报），
+      按申报年分组会把它划出窗口，还会把上一年度的 10-K 划入窗口
+    - 仅统计 include_forms（默认年报+季报），Form 4/8-K/6-K 等噪音不参与
+    """
+    if include_forms is None:
+        include_forms = ANNUAL_FORMS | QUARTERLY_FORMS
+    else:
+        include_forms = set(include_forms)
+
+    annual_idx = [i for i, f in enumerate(forms)
+                  if f in ANNUAL_FORMS and i < len(report_dates) and report_dates[i]]
+    if annual_idx:
+        latest = max(annual_idx, key=lambda i: report_dates[i])
+    else:
+        # 无年报（新上市公司只有季报，如刚 IPO 的 SPCX）：锚定最新一份季报财年
+        quarterly_idx = [i for i, f in enumerate(forms)
+                         if f in QUARTERLY_FORMS and i < len(report_dates) and report_dates[i]]
+        if not quarterly_idx:
+            return {}
+        latest = max(quarterly_idx, key=lambda i: report_dates[i])
+    fy_end_month = int(report_dates[latest][5:7])
+    latest_fy = int(report_dates[latest][:4])
+    target_years = set(range(latest_fy - years + 1, latest_fy + 1))
+
+    def _fy(report_date):
+        y, m = int(report_date[:4]), int(report_date[5:7])
+        return y if m <= fy_end_month else y + 1
+
+    groups = {}
+    for i, form in enumerate(forms):
+        if form not in include_forms or i >= len(report_dates) or not report_dates[i]:
+            continue
+        fy = _fy(report_dates[i])
+        if fy in target_years:
+            groups.setdefault(fy, []).append(i)
+    return groups
 
 
 def build_filing_url(cik_short, accession_flat, filename):
@@ -341,13 +422,13 @@ def cmd_download(symbol, form_type=None, index=0, fiscal_year=None, force=False,
     print(f"\n=== Download SEC Filing: {name} ({ticker}) ===")
     print(f"Form: {form_type or '10-K + 10-Q'} | Years: {years}")
 
-    data = fetch_submissions(cik)
-    if not data:
+    recent = _fetch_all_submissions(cik)
+    if not recent:
         return False
-    recent = data["filings"]["recent"]
 
     forms = recent.get("form", [])
     dates = recent.get("filingDate", [])
+    report_dates = recent.get("reportDate", [])
     accessions = recent.get("accessionNumber", [])
     primary_docs = recent.get("primaryDocument", [])
 
@@ -370,26 +451,24 @@ def cmd_download(symbol, form_type=None, index=0, fiscal_year=None, force=False,
         print(f"ERROR: No {'/'.join(target_forms)} filings found for {ticker}")
         return False
 
-    # 按年份分组
-    if fiscal_year:
-        year_range = [fiscal_year]
-    else:
-        current_year = datetime.now().year
-        year_range = range(current_year - years + 1, current_year + 1)
     cik_short = str(int(cik))
     script = os.path.join(os.path.dirname(__file__), "download_filing.py")
     downloaded_count = 0
     skipped_count = 0
 
-    for year in year_range:
-        year_str = str(year)
-        year_matches = [i for i in matches if dates[i][:4] == year_str]
+    # 按财年分组（锚定最新年报财年，保证每财年 1 份年报 + 3 份季报）
+    groups = group_filings_by_fiscal_year(forms, dates, report_dates, years=years,
+                                          include_forms=target_forms)
+    if fiscal_year:
+        groups = {fy: idx for fy, idx in groups.items() if fy == fiscal_year}
+    if not groups:
+        print(f"ERROR: 近 {years} 年（财年）未找到 {'/'.join(target_forms)} 财报")
+        return False
 
-        if not year_matches:
-            print(f"\n--- {year}: 无匹配财报 ---")
-            continue
+    for year in sorted(groups):
+        year_matches = groups[year]
 
-        print(f"\n--- {year}: 找到 {len(year_matches)} 份财报 ---")
+        print(f"\n--- FY{year}: 找到 {len(year_matches)} 份财报 ---")
 
         for idx in year_matches:
             acc = accessions[idx]

@@ -21,10 +21,344 @@ REQUIRED_CASHFLOW_FIELDS = [
     ("free_cash_flow", "自由现金流"),
 ]
 
+# 货币金额类指标（单位归一化时需要缩放的字段，比率类指标不受影响）
+_MONETARY_KEYS = [
+    "revenue", "net_income", "cost_of_revenue", "gross_profit", "operating_income",
+    "total_assets", "total_liabilities", "stockholders_equity",
+    "current_assets", "current_liabilities", "inventories", "cash_equivalents",
+    "interest_expense", "goodwill",
+    "primary_revenue", "primary_cost", "primary_profit",
+]
 
-def extract_key_metrics(text: str) -> Dict[str, Any]:
-    """从文本中提取关键财务指标"""
+
+def detect_reporting_unit(text: str):
+    """检测报表货币与数量级，返回 (货币符号, 换算到百万的因子)
+
+    依据财务报表表头声明，如 "(in millions, except per share data)"、
+    "(RMB in thousands, except share and per share data)"。
+    无法识别时默认美元/百万（美股 10-K 主流格式）。
+    """
+    m = re.search(
+        r"\(\s*(RMB|US\$|\$)?\s*(?:amounts?\s*)?in\s+(thousands|millions)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if not m:
+        return "$", 1.0
+    currency = "¥" if (m.group(1) or "").upper() == "RMB" else "$"
+    factor = 0.001 if m.group(2).lower() == "thousands" else 1.0
+    return currency, factor
+
+
+# 收益表/资产负债表关键科目的 XBRL us-gaap 标签（按优先级排列，通用标签在前）
+_XBRL_METRIC_TAGS = {
+    "revenue": [
+        "Revenues",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "RevenueFromContractWithCustomerIncludingAssessedTax",
+        "SalesRevenueNet",
+    ],
+    "net_income": ["NetIncomeLoss", "ProfitLoss"],
+    "operating_income": ["OperatingIncomeLoss"],
+    "cost_of_revenue": ["CostOfRevenue", "CostOfGoodsAndServicesSold"],
+    "total_assets": ["Assets"],
+    "total_liabilities": ["Liabilities"],
+    "stockholders_equity": [
+        "StockholdersEquity",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+    ],
+}
+
+# duration（区间）类科目：10-Q 中存在单季与 YTD 累计两种 context，需按时长筛选；
+# 资产负债表科目为 instant（时点）context，不适用
+_DURATION_METRIC_KEYS = {"revenue", "net_income", "operating_income", "cost_of_revenue"}
+
+
+def _xbrl_attr(text: str, m, attr: str) -> str:
+    """取 iXBRL 标签的属性值。contextRef/unitRef/scale 可能位于 name= 之前
+    （不在匹配的 group(0) 内），需向前回溯窗口查找；窗口可能包含前一个标签
+    的属性，故取最后一个匹配（最贴近当前标签）。"""
+    ms = re.findall(rf'{attr}="([^"]*)"', m.group(0))
+    if ms:
+        return ms[-1]
+    window = text[max(0, m.start() - 500):m.start()]
+    ms = re.findall(rf'{attr}="([^"]*)"', window)
+    return ms[-1] if ms else ""
+
+
+def _build_context_spans(text: str) -> Dict[str, tuple]:
+    """解析 <xbrli:context> 的期间定义，返回 {context id: (start, end)}
+
+    start 为 startDate（duration context）；instant 时点 context 的 start
+    为 None。end 取 endDate 或 instant。contextRef 与会计期的对应关系由
+    XBRL 的 context 元素权威定义，不受 id 命名方式影响（MSFT 用 GUID 命名）。
+    """
+    spans = {}
+    for m in re.finditer(
+        r'<xbrli:context\b[^>]*\bid="([^"]+)"[^>]*>(.*?)</xbrli:context>',
+        text, re.DOTALL | re.IGNORECASE,
+    ):
+        ctx_id, body = m.group(1), m.group(2)
+        sm = re.search(r"<xbrli:startDate>([^<]+)</xbrli:startDate>", body)
+        em = (re.search(r"<xbrli:endDate>([^<]+)</xbrli:endDate>", body)
+              or re.search(r"<xbrli:instant>([^<]+)</xbrli:instant>", body))
+        if em:
+            spans[ctx_id] = (sm.group(1) if sm else None, em.group(1))
+    return spans
+
+
+def _build_context_periods(text: str) -> Dict[str, str]:
+    """解析 context 期间定义，返回 {context id: 会计期年份}（endDate 年份）"""
+    periods = {}
+    for ctx_id, (_start, end) in _build_context_spans(text).items():
+        ym = re.search(r"(20\d{2})", end)
+        if ym:
+            periods[ctx_id] = ym.group(1)
+    return periods
+
+
+def _filter_quarter_spans(text: str, matches: List[Any], spans: Dict[str, tuple]) -> List[Any]:
+    """从 iXBRL 实例中筛选单季 context（duration 80-100 天）且期末最新的。
+
+    10-Q 收益表同时存在单季与 YTD 累计 context（期末相同），按"同年最大值"
+    选取会拿到累计值冒充单季 —— 财务数据不可造假，必须按时长区分。"""
+    from datetime import date
+
+    def _end_day(m):
+        span = spans.get(_xbrl_attr(text, m, "contextRef"))
+        if not span or span[0] is None:
+            return None
+        try:
+            start = date.fromisoformat(span[0][:10])
+            end = date.fromisoformat(span[1][:10])
+        except ValueError:
+            return None
+        if not 80 <= (end - start).days <= 100:
+            return None
+        return end
+
+    quarter_insts = [(m, d) for m, d in ((m, _end_day(m)) for m in matches) if d]
+    if not quarter_insts:
+        return []
+    max_end = max(d for _, d in quarter_insts)
+    return [m for m, d in quarter_insts if d == max_end]
+
+
+def _xbrl_ctx_year(text: str, m, periods: Dict[str, str] = None) -> str:
+    """取事实的会计期年份：优先查 context period 定义，回退到 contextRef
+    中的年份数字。列顺序因公司而异（MSFT 最新年在前、PDD 最新年在后），
+    不能按出现顺序取，必须比较年份。"""
+    ctx_id = _xbrl_attr(text, m, "contextRef")
+    if periods and ctx_id in periods:
+        return periods[ctx_id]
+    years = re.findall(r"(20\d{2})", ctx_id)
+    return max(years) if years else ""
+
+
+def _xbrl_parse(text: str, m):
+    """解析 iXBRL 标签数值：按 scale 换算到百万，sign="-" 表示负数，
+    根据 unitRef 判断币种。返回 (百万值, 货币符号)"""
+    value = int(m.group(1).replace(",", ""))
+    scale_s = _xbrl_attr(text, m, "scale")
+    if scale_s:
+        value = round(value * (10 ** int(scale_s)) / 1e6)
+    if _xbrl_attr(text, m, "sign") == "-":
+        value = -value
+    unit_upper = _xbrl_attr(text, m, "unitRef").upper()
+    currency = "¥" if ("RMB" in unit_upper or "CNY" in unit_upper) else "$"
+    return value, currency
+
+
+def _xbrl_pick_latest(text: str, tag_names: List[str], periods: Dict[str, str] = None) -> List[Any]:
+    """收集指定 XBRL 标签在最新会计期（context 年份最大）的全部实例"""
+    matches = []
+    for tag in tag_names:
+        pattern = rf'name="[^"]*:{re.escape(tag)}"[^>]*>([\d,]+)<'
+        matches.extend(re.finditer(pattern, text, re.IGNORECASE))
+    if not matches:
+        return []
+    target_year = max(_xbrl_ctx_year(text, m, periods) for m in matches)
+    return [m for m in matches if _xbrl_ctx_year(text, m, periods) == target_year]
+
+
+def _compute_derived_metrics(metrics: Dict[str, Any], currency: str = "$") -> None:
+    """基于 *_num 原始值计算派生指标（毛利润/利润率/财务健康比率）。
+
+    在文本提取、XBRL 覆盖、单位归一化全部完成后调用一次，
+    保证派生值基于最终合并后的数据，可整体替换中间重复计算。"""
+
+    # 毛利润 = 营收 - 营业成本；毛利率
+    if "revenue_num" in metrics and "cost_of_revenue_num" in metrics:
+        gross_profit = metrics["revenue_num"] - metrics["cost_of_revenue_num"]
+        metrics["gross_profit"] = f"{currency}{gross_profit:,}M"
+        metrics["gross_profit_num"] = gross_profit
+        if metrics["revenue_num"] > 0:
+            metrics["gross_margin"] = f"{gross_profit / metrics['revenue_num'] * 100:.1f}%"
+
+    # 营业利润率 / 净利率
+    if "operating_income_num" in metrics and metrics.get("revenue_num", 0) > 0:
+        metrics["operating_margin"] = f"{metrics['operating_income_num'] / metrics['revenue_num'] * 100:.1f}%"
+    if "net_income_num" in metrics and metrics.get("revenue_num", 0) > 0:
+        metrics["net_margin"] = f"{metrics['net_income_num'] / metrics['revenue_num'] * 100:.1f}%"
+
+    # ====== 财务健康指标 ======
+
+    # 资产负债率 = 总负债 / 总资产
+    if metrics.get("total_assets_num", 0) > 0 and "total_liabilities_num" in metrics:
+        debt_ratio = metrics["total_liabilities_num"] / metrics["total_assets_num"] * 100
+        metrics["debt_to_asset_ratio"] = f"{debt_ratio:.1f}%"
+        metrics["debt_to_asset_ratio_num"] = debt_ratio
+
+    # 流动比率 = 流动资产 / 流动负债
+    if "current_assets_num" in metrics and metrics.get("current_liabilities_num", 0) > 0:
+        current_ratio = metrics["current_assets_num"] / metrics["current_liabilities_num"]
+        metrics["current_ratio"] = f"{current_ratio:.2f}"
+        metrics["current_ratio_num"] = current_ratio
+
+    # 速动比率 = (流动资产 - 存货) / 流动负债
+    if "current_assets_num" in metrics and "inventories_num" in metrics and metrics.get("current_liabilities_num", 0) > 0:
+        quick_ratio = (metrics["current_assets_num"] - metrics["inventories_num"]) / metrics["current_liabilities_num"]
+        metrics["quick_ratio"] = f"{quick_ratio:.2f}"
+        metrics["quick_ratio_num"] = quick_ratio
+
+    # 净现金不计算：无债务科目数据源，用"现金-总负债"近似会得出错误结论
+    # （如现金充裕的 MSFT/AAPL 显示巨额负净现金）。宁缺勿错，不输出该字段。
+
+    # 利息覆盖倍数 = 营业利润 / 利息费用
+    if "operating_income_num" in metrics and metrics.get("interest_expense_num", 0) > 0:
+        interest_coverage = metrics["operating_income_num"] / metrics["interest_expense_num"]
+        metrics["interest_coverage"] = f"{interest_coverage:.1f}x"
+        metrics["interest_coverage_num"] = interest_coverage
+
+    # 商誉占比 = 商誉 / 总资产
+    if "goodwill_num" in metrics and metrics.get("total_assets_num", 0) > 0:
+        goodwill_ratio = metrics["goodwill_num"] / metrics["total_assets_num"] * 100
+        metrics["goodwill_to_assets"] = f"{goodwill_ratio:.1f}%"
+        metrics["goodwill_to_assets_num"] = goodwill_ratio
+
+    # ROE = 净利润 / 股东权益
+    if "net_income_num" in metrics and metrics.get("stockholders_equity_num", 0) > 0:
+        roe = metrics["net_income_num"] / metrics["stockholders_equity_num"] * 100
+        metrics["roe"] = f"{roe:.1f}%"
+        metrics["roe_num"] = roe
+
+
+# 比率类指标合理范围（超出视为提取/口径异常 → 置空并告警）。
+# 下界为宽松经验值（真实企业极端亏损可能突破常规区间），主要拦截
+# "抓错科目/抓错期间"产生的数量级错误
+_RATIO_SANE_BOUNDS = {
+    "metrics": {
+        "gross_margin": (-200, 100, "毛利率"),
+        "operating_margin": (-300, 300, "营业利润率"),
+        "net_margin": (-300, 300, "净利率"),
+        "debt_to_asset_ratio": (0, 150, "资产负债率"),
+        "current_ratio": (0, 100, "流动比率"),
+        "quick_ratio": (0, 100, "速动比率"),
+        "goodwill_to_assets": (0, 100, "商誉占比"),
+    },
+    "cash_flows": {
+        "fcf_margin": (-300, 300, "FCF利润率"),
+        "capex_to_revenue": (0, 500, "CapEx/营收"),
+    },
+}
+
+
+def _parse_ratio_value(v) -> Any:
+    """从展示字符串解析比率数值（兼容 "67.9%" / "1.66" / "12.5x" 格式）"""
+    if not isinstance(v, str):
+        return None
+    s = v.strip().rstrip("%").rstrip("x").replace(",", "")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def validate_metrics(metrics: Dict[str, Any], cash_flows: Dict[str, Any] = None) -> List[str]:
+    """数据质量校验：获取失败的字段保持缺失（报告的缺失警告机制已覆盖）；
+    提取结果超出合理范围的异常值直接置空并返回告警列表——财务数据必须真实，
+    不做默认值、不做模拟值。"""
+    warnings = []
+    for dict_name, data in (("metrics", metrics), ("cash_flows", cash_flows or {})):
+        for key, (lo, hi, label) in _RATIO_SANE_BOUNDS[dict_name].items():
+            if key not in data:
+                continue
+            value = _parse_ratio_value(data[key])
+            if value is None or lo <= value <= hi:
+                continue
+            warnings.append(
+                f"{label}({key})={data[key]} 超出合理范围 [{lo}, {hi}]，疑似提取错误，已置空")
+            data.pop(key)
+            data.pop(key + "_num", None)
+
+    # 基础科目必须为正数
+    for key, label in (("revenue", "营收"), ("total_assets", "总资产")):
+        v = metrics.get(key + "_num")
+        if isinstance(v, (int, float)) and v <= 0:
+            warnings.append(f"{label}={metrics.get(key)} 非正数，疑似提取错误，已置空")
+            metrics.pop(key)
+            metrics.pop(key + "_num", None)
+
+    return warnings
+
+
+# 无 iXBRL 文件（如 PDD 的 6-K 盈利公告）叙述句模式：句中数字为本期值，
+# 货币直接由句子给出（RMB/US$），单位支持 billion/million（早期公告用 million）
+_NARRATIVE_METRIC_PATTERNS = [
+    ("revenue",
+     r"Total\s+revenues?(?:\s+in\s+the\s+quarter)?\s+were\s+(RMB|US\$)\s*([\d.,]+)\s+(billion|million)"),
+    ("operating_income",
+     r"Operating\s+profit(?:\s+in\s+the\s+quarter)?\s+was\s+(RMB|US\$)\s*([\d.,]+)\s+(billion|million)"),
+    ("net_income",
+     r"Net\s+income(?:\s+attributable\s+to\s+ordinary\s+shareholders)?(?:\s+in\s+the\s+quarter)?"
+     r"\s+was\s+(RMB|US\$)\s*([\d.,]+)\s+(billion|million)"),
+]
+
+
+def _narrative_to_millions(num_str: str, unit: str) -> float:
+    return float(num_str.replace(",", "")) * (1000 if unit.lower() == "billion" else 1)
+
+
+def _extract_metrics_from_narrative(text: str) -> Dict[str, Any]:
+    """无 iXBRL 文件从叙述句提取本期指标。
+
+    这类文件（如 PDD 6-K 盈利公告）报表列为[前期, 本期, US$]，表格取第一个
+    数会拿到前期值 —— 表格值宁缺勿错，只输出叙述句可确证的本期数据。"""
+    clean_text = text.replace("&#160;", " ").replace("&nbsp;", " ")
+    clean_text = re.sub(r"\s+", " ", clean_text)
+
+    metrics: Dict[str, Any] = {}
+    currency = "$"
+    for key, pattern in _NARRATIVE_METRIC_PATTERNS:
+        m = re.search(pattern, clean_text, re.IGNORECASE)
+        if not m:
+            continue
+        currency = "¥" if m.group(1).upper() == "RMB" else "$"
+        value = _narrative_to_millions(m.group(2), m.group(3))
+        metrics[f"{key}_num"] = int(round(value))
+        metrics[key] = f"{currency}{value:,.0f}M"
+
+    _compute_derived_metrics(metrics, currency if metrics else "$")
+    return metrics
+
+
+def extract_key_metrics(text: str, html: str = None, quarterly: bool = False) -> Dict[str, Any]:
+    """从文本中提取关键财务指标
+
+    html: 原始 HTML 内容（可选）。提供时优先用 iXBRL 标签提取收益表/资产负债表
+    科目——文本正则在列序/分部表场景会抓错会计期（如 PDD 20-F 的 VIE 表列序），
+    而 XBRL 带 contextRef 会计期上下文，更可靠；无 XBRL 匹配的科目回退文本结果。
+
+    quarterly: 10-Q 场景为 True，收益表/每股收益取单季（≈3个月 duration）
+    context —— 同期末还存在 YTD 累计 context，按数值最大选取会拿到累计值。
+    资产负债表为时点 context，不受影响。
+    """
     metrics = {}
+
+    # 无 iXBRL 的文件（如 PDD 6-K 盈利公告）：报表列为[前期, 本期, US$]，
+    # 表格取第一个数会拿到前期值 —— 只从叙述句提取本期数据
+    if html is not None and not re.search(r"<ix:nonFraction", html):
+        return _extract_metrics_from_narrative(text)
 
     # 清理 HTML 实体
     clean_text = text.replace("&#160;", " ").replace("&nbsp;", " ")
@@ -44,11 +378,17 @@ def extract_key_metrics(text: str) -> Dict[str, Any]:
         r"net\s+(?:income|loss)\s*[:\$]\s*(\d[\d,]*)",
     ]
 
-    # EPS 模式 - Basic earnings per share $ 2.81
+    # EPS 模式 - 数字紧跟在标签之后（可有 $ 前缀），禁止大跨度跳匹配，防止
+    # "Diluted earnings per share ... Revenue increased $50.1 billion" 这类跨行误匹配
+    # 约定：优先 Diluted（估值标准口径），再 Basic；EPS 必须带小数点，避免抓到 "increased 32%" 整数
+    # (?<![\d,.]) 防止从 "7,452.9" 这类股本数中截取小数部分
+    eps_num = r"(?<![\d,.])(\d+\.\d+)"
     eps_patterns = [
-        r"(?:Basic|Diluted)\s+earnings\s*(?:\(loss\))?\s*per\s+share.*?[$]\s*(\d[\d.]*)",
-        r"Earnings\s+per\s+common\s+share.*?[$]\s*(\d[\d.]*)",
-        r"earnings\s+per\s+share\s*[:][$]\s*(\d[\d.]*)",
+        rf"Diluted\s+(?:earnings\s*(?:\(loss\))?\s*)?per\s+share\s*[$]?\s*\(?{eps_num}\)?",
+        rf"Earnings\s+per\s+share.{{0,40}}?Diluted\s*[$]?\s*\(?{eps_num}\)?",
+        rf"Diluted[^0-9$.]{{0,30}}{eps_num}",
+        rf"Basic\s+(?:earnings\s*(?:\(loss\))?\s*)?per\s+share\s*[$]?\s*\(?{eps_num}\)?",
+        rf"per\s+(?:common\s+)?share\s*[:$]\s*\(?{eps_num}\)?",
     ]
 
     # 营收（取所有匹配中的最大值，避免分部数据干扰）
@@ -94,33 +434,42 @@ def extract_key_metrics(text: str) -> Dict[str, Any]:
             break
 
     # Cost of revenues (用于计算毛利润)
+    # 与营收相同的口径：优先 "Total cost of revenue/sales"（利润表行），
+    # 否则取所有匹配中的最大值（分部数据之和等于总额，最大值即合并口径）
     cost_patterns = [
-        r"Cost\s+of\s+revenues?\s+[$]?\s*(\d[\d,]*)",
-        r"Cost\s+of\s+sales\s+[$]?\s*(\d[\d,]*)",
+        r"Total\s+cost\s+of\s+(?:revenues?|sales)\s+[$]?\s*\(?(\d[\d,]*)",
+        r"Cost\s+of\s+(?:revenues?|sales)\s+[$]?\s*\(?(\d[\d,]*)",
     ]
-    for pattern in cost_patterns:
-        match = re.search(pattern, clean_text, re.IGNORECASE)
-        if match:
-            try:
-                value = match.group(1).replace(",", "")
-                metrics["cost_of_revenue"] = f"${int(value):,}M"
-                metrics["cost_of_revenue_num"] = int(value)
-                break
-            except (ValueError, OverflowError) as e:
-                start = max(0, match.start() - 20)
-                end = min(len(clean_text), match.end() + 20)
-                context = clean_text[start:end]
-                print(f"   ⚠️  营业成本数值解析失败: '{match.group(1)}' | 上下文: '{context}' | {e}")
-                continue
 
-    # 毛利润 = 营收 - Cost of revenues
-    if "revenue_num" in metrics and "cost_of_revenue_num" in metrics:
-        gross_profit = metrics["revenue_num"] - metrics["cost_of_revenue_num"]
-        metrics["gross_profit"] = f"${gross_profit:,}M"
-        metrics["gross_profit_num"] = gross_profit
-        # 毛利率
-        if metrics["revenue_num"] > 0:
-            metrics["gross_margin"] = f"{gross_profit / metrics['revenue_num'] * 100:.1f}%"
+    def _parse_num(s):
+        return int(s.replace(",", ""))
+
+    total_cost = 0
+    for match in re.finditer(cost_patterns[0], clean_text, re.IGNORECASE):
+        try:
+            total_cost = _parse_num(match.group(1))
+            break
+        except (ValueError, OverflowError):
+            continue
+
+    max_cost = total_cost
+    if max_cost == 0:
+        for pattern in cost_patterns[1:]:
+            for match in re.finditer(pattern, clean_text, re.IGNORECASE):
+                try:
+                    value = _parse_num(match.group(1))
+                    if value > max_cost:
+                        max_cost = value
+                except (ValueError, OverflowError) as e:
+                    start = max(0, match.start() - 20)
+                    end = min(len(clean_text), match.end() + 20)
+                    context = clean_text[start:end]
+                    print(f"   ⚠️  营业成本数值解析失败: '{match.group(1)}' | 上下文: '{context}' | {e}")
+                    continue
+
+    if max_cost > 0:
+        metrics["cost_of_revenue"] = f"${max_cost:,}M"
+        metrics["cost_of_revenue_num"] = max_cost
 
     # 营业利润 (Operating income)
     operating_patterns = [
@@ -135,9 +484,6 @@ def extract_key_metrics(text: str) -> Dict[str, Any]:
                 value = match.group(1).replace(",", "")
                 metrics["operating_income"] = f"${int(value):,}M"
                 metrics["operating_income_num"] = int(value)
-                # 营业利润率
-                if "revenue_num" in metrics and metrics["revenue_num"] > 0:
-                    metrics["operating_margin"] = f"{int(value) / metrics['revenue_num'] * 100:.1f}%"
                 break
             except (ValueError, OverflowError) as e:
                 start = max(0, match.start() - 20)
@@ -145,10 +491,6 @@ def extract_key_metrics(text: str) -> Dict[str, Any]:
                 context = clean_text[start:end]
                 print(f"   ⚠️  营业利润数值解析失败: '{match.group(1)}' | 上下文: '{context}' | {e}")
                 continue
-
-    # 净利率
-    if "net_income_num" in metrics and "revenue_num" in metrics and metrics["revenue_num"] > 0:
-        metrics["net_margin"] = f"{metrics['net_income_num'] / metrics['revenue_num'] * 100:.1f}%"
 
     # 总资产 (Total assets)
     total_assets_patterns = [
@@ -340,68 +682,80 @@ def extract_key_metrics(text: str) -> Dict[str, Any]:
                 print(f"   ⚠️  商誉数值解析失败: '{match.group(1)}' | 上下文: '{context}' | {e}")
                 continue
 
-    # ====== 计算财务健康指标 ======
+    # ====== XBRL 结构化提取（优先于文本启发式）======
+    # 收益表/资产负债表科目带 contextRef 会计期上下文，可避免文本正则抓错期间；
+    # 同一会计期的多个实例（母公司/子公司/VIE/合并列）取最大值即合并口径
+    xbrl_keys = set()  # XBRL 已换算到百万，末尾文本单位归一化时跳过，避免双重缩放
+    if html:
+        spans = _build_context_spans(html)
+        periods = _build_context_periods(html)
+        for key, tags in _XBRL_METRIC_TAGS.items():
+            insts = _xbrl_pick_latest(html, tags, periods)
+            if not insts:
+                continue
+            # 10-Q：收益表科目（duration context）筛选单季，避免取到 YTD 累计值
+            if quarterly and key in _DURATION_METRIC_KEYS:
+                insts = _filter_quarter_spans(html, insts, spans)
+                if not insts:
+                    continue
+            chosen = max(insts, key=lambda m: int(m.group(1).replace(",", "")))
+            try:
+                value, currency = _xbrl_parse(html, chosen)
+            except (ValueError, OverflowError) as e:
+                print(f"   ⚠️  XBRL {key} 数值解析失败: '{chosen.group(1)}' | {e}")
+                continue
+            metrics[key] = f"{currency}{value:,}M" if value >= 0 else f"({currency}{abs(value):,}M)"
+            metrics[key + "_num"] = value
+            xbrl_keys.add(key)
 
-    # 资产负债率 = 总负债 / 总资产 × 100%
-    if "total_liabilities_num" in metrics and "total_assets_num" in metrics and metrics["total_assets_num"] > 0:
-        debt_ratio = metrics["total_liabilities_num"] / metrics["total_assets_num"] * 100
-        metrics["debt_to_asset_ratio"] = f"{debt_ratio:.1f}%"
-        metrics["debt_to_asset_ratio_num"] = debt_ratio
+        # EPS：XBRL 优先 Diluted，其次 Basic（每股数值无 scale 换算）
+        for tag in ("EarningsPerShareDiluted", "EarningsPerShareBasic"):
+            eps_matches = list(re.finditer(
+                rf'name="[^"]*:{tag}"[^>]*>([\d.]+)<', html, re.IGNORECASE))
+            if not eps_matches:
+                continue
+            target_year = max(_xbrl_ctx_year(html, m, periods) for m in eps_matches)
+            eps_insts = [m for m in eps_matches if _xbrl_ctx_year(html, m, periods) == target_year]
+            # 10-Q：单季 EPS 优先于 YTD 累计 EPS
+            if quarterly:
+                quarter_insts = _filter_quarter_spans(html, eps_insts, spans)
+                if quarter_insts:
+                    eps_insts = quarter_insts
+            chosen = eps_insts[0]
+            currency = "¥" if ("RMB" in _xbrl_attr(html, chosen, "unitRef").upper()
+                               or "CNY" in _xbrl_attr(html, chosen, "unitRef").upper()) else "$"
+            metrics["eps"] = f"{currency}{chosen.group(1)}"
+            xbrl_keys.add("eps")
+            break
 
-    # 流动比率 = 流动资产 / 流动负债
-    if "current_assets_num" in metrics and "current_liabilities_num" in metrics and metrics["current_liabilities_num"] > 0:
-        current_ratio = metrics["current_assets_num"] / metrics["current_liabilities_num"]
-        metrics["current_ratio"] = f"{current_ratio:.2f}"
-        metrics["current_ratio_num"] = current_ratio
+    # ====== 单位/币种归一化（如 "(RMB in thousands)" 外国发行人报表） ======
+    # 仅作用于文本回退路径的科目；XBRL 科目已按 scale 属性换算
+    currency, factor = detect_reporting_unit(clean_text)
+    if factor != 1.0 or currency != "$":
+        for key in _MONETARY_KEYS:
+            num_key = key + "_num"
+            if num_key in metrics and key not in xbrl_keys:
+                metrics[num_key] = round(metrics[num_key] * factor)
+                metrics[key] = f"{currency}{metrics[num_key]:,}M"
+        if "eps" in metrics and currency != "$" and "eps" not in xbrl_keys:
+            metrics["eps"] = currency + metrics["eps"].lstrip("$")
 
-    # 速动比率 = (流动资产 - 存货) / 流动负债
-    if "current_assets_num" in metrics and "inventories_num" in metrics and "current_liabilities_num" in metrics and metrics["current_liabilities_num"] > 0:
-        quick_ratio = (metrics["current_assets_num"] - metrics["inventories_num"]) / metrics["current_liabilities_num"]
-        metrics["quick_ratio"] = f"{quick_ratio:.2f}"
-        metrics["quick_ratio_num"] = quick_ratio
+    # 封面流通股数（dei 结构化标签，DCF 每股估值的兜底数据源）。
+    # 10-K/10-Q/20-F 封面必有；6-K 无 dei 标签则缺失，不伪造。
+    # 多类股（如 GOOGL A/B/C、NKE A/B）为多个同名标签，需求和；
+    # scale 语义: 显示值 × 10^scale = 实际股数（GOOGL scale=6 值 5,941 = 5.941B 股）
+    if html is not None:
+        total_shares = 0
+        for m_sh in re.finditer(
+                r'name="dei:EntityCommonStockSharesOutstanding"([^>]*)>([\d,]+)<', html):
+            scale_m = re.search(r'scale="(\d+)"', m_sh.group(1))
+            scale = int(scale_m.group(1)) if scale_m else 0
+            total_shares += int(m_sh.group(2).replace(",", "")) * (10 ** scale)
+        if total_shares > 0:
+            metrics["shares_outstanding_num"] = total_shares
 
-    # 净现金 = 现金及等价物 - 总负债
-    if "cash_equivalents_num" in metrics and "total_liabilities_num" in metrics:
-        net_cash = metrics["cash_equivalents_num"] - metrics["total_liabilities_num"]
-        if net_cash >= 0:
-            metrics["net_cash"] = f"${net_cash:,}M"
-        else:
-            metrics["net_cash"] = f"(${abs(net_cash):,}M)"
-        metrics["net_cash_num"] = net_cash
-
-    # 利息覆盖倍数 = 营业利润 / 利息费用
-    if "operating_income_num" in metrics and "interest_expense_num" in metrics and metrics["interest_expense_num"] > 0:
-        interest_coverage = metrics["operating_income_num"] / metrics["interest_expense_num"]
-        metrics["interest_coverage"] = f"{interest_coverage:.1f}x"
-        metrics["interest_coverage_num"] = interest_coverage
-
-    # 商誉占比 = 商誉 / 总资产 × 100%
-    if "goodwill_num" in metrics and "total_assets_num" in metrics and metrics["total_assets_num"] > 0:
-        goodwill_ratio = metrics["goodwill_num"] / metrics["total_assets_num"] * 100
-        metrics["goodwill_to_assets"] = f"{goodwill_ratio:.1f}%"
-        metrics["goodwill_to_assets_num"] = goodwill_ratio
-
-    # ROE = 净利润 / 股东权益 × 100%
-    if "net_income_num" in metrics and "stockholders_equity_num" in metrics and metrics["stockholders_equity_num"] > 0:
-        roe = metrics["net_income_num"] / metrics["stockholders_equity_num"] * 100
-        metrics["roe"] = f"{roe:.1f}%"
-        metrics["roe_num"] = roe
-
-    # 主营利润相关字段（需要从业务分部信息提取，暂时使用总数据近似）
-    # TODO: 需要大模型从业务分部信息中提取主营收入和主营成本
-    # 目前使用营收和成本作为近似
-    if "revenue_num" in metrics:
-        metrics["primary_revenue"] = metrics.get("revenue")
-        metrics["primary_revenue_num"] = metrics.get("revenue_num")
-    if "cost_of_revenue_num" in metrics:
-        metrics["primary_cost"] = metrics.get("cost_of_revenue")
-        metrics["primary_cost_num"] = metrics.get("cost_of_revenue_num")
-    if "primary_revenue_num" in metrics and "primary_cost_num" in metrics:
-        primary_profit = metrics["primary_revenue_num"] - metrics["primary_cost_num"]
-        metrics["primary_profit"] = f"${primary_profit:,}M"
-        metrics["primary_profit_num"] = primary_profit
-        if metrics["primary_revenue_num"] > 0:
-            metrics["primary_margin"] = f"{primary_profit / metrics['primary_revenue_num'] * 100:.1f}%"
+    # 派生指标（毛利润/利润率/财务健康比率）在数据源合并与归一化完成后统一计算
+    _compute_derived_metrics(metrics, currency)
 
     return metrics
 
@@ -410,51 +764,100 @@ def extract_cash_flows(text: str) -> Dict[str, Any]:
     """从文本中提取现金流数据（经营/投资/筹资）"""
     cash_flows = {}
 
+    # 无 iXBRL 的文件（如 PDD 6-K 盈利公告）：现金流量表列为[前期, 本期, US$]，
+    # 表格取第一个数会拿到前期值 —— 只从叙述句提取本期经营现金流
+    # （仅对 HTML 文档生效；纯文本输入走原有文本回退路径）
+    if re.match(r"\s*<", text) and not re.search(r"<ix:nonFraction", text):
+        # 去除 HTML 标签（叙述句中可能夹杂标签，如 RMB</FONT>25.7 billion）
+        clean_text = re.sub(r"<[^>]+>", " ", text)
+        clean_text = re.sub(r"\s+", " ", clean_text.replace("&#160;", " ").replace("&nbsp;", " "))
+        m = re.search(
+            r"Net\s+cash\s+(generated\s+from|used\s+in)\s+operating\s+activities"
+            r"\s+was\s+(RMB|US\$)\s*([\d.,]+)\s+(billion|million)",
+            clean_text, re.IGNORECASE)
+        if m:
+            currency = "¥" if m.group(2).upper() == "RMB" else "$"
+            value = _narrative_to_millions(m.group(3), m.group(4))
+            if m.group(1).lower().startswith("used"):
+                value = -value
+            cash_flows["operating"] = f"{currency}{abs(value):,.0f}M" if value >= 0 else f"({currency}{abs(value):,.0f}M)"
+            cash_flows["operating_num"] = value
+        return cash_flows
+
     # 清理 HTML 实体和标签
     clean_text = text.replace("&#160;", " ").replace("&nbsp;", " ")
     clean_text = re.sub(r"<[^>]+>", " ", clean_text)  # 去除 HTML 标签
     clean_text = re.sub(r"\s+", " ", clean_text)
+    # 文本回退路径的单位换算（XBRL 路径用 scale 属性，不走这里）
+    text_currency, unit_factor = detect_reporting_unit(clean_text)
+    op_currency = text_currency  # FCF 币种随经营现金流（XBRL 提取时更新为 unitRef 币种）
 
     # 方法1: 从 XBRL 标签提取（优先）
     xbrl_patterns = {
         "operating": r'name="us-gaap:NetCashProvidedByUsedInOperatingActivities"[^>]*>([\d,]+)<',
         "investing": r'name="us-gaap:NetCashProvidedByUsedInInvestingActivities"[^>]*>([\d,]+)<',
         "financing": r'name="us-gaap:NetCashProvidedByUsedInFinancingActivities"[^>]*>([\d,]+)<',
-        "capex": r'name="us-gaap:PaymentsToAcquire(?:PropertyPlantAndEquipment|ProductiveAssets)"[^>]*>([\d,]+)<',
-        "depreciation_amortization": r'name="us-gaap:Depreciation(?:AndAmortizationAndAccretionNet|Net|)"[^>]*>([\d,]+)<',
+        # capex：任意命名空间的 PaymentsToAcquire*，按语义（Property/Equipment/
+        # Productive）筛选，排除证券投资类（ShortTerm/Longterm Investments），
+        # 兼容自定义标签（如 pdd:PaymentsToAcquirePropertyEquipmentAndSoftwareAndIntangibleAssets）
+        "capex": r'name="[^"]*:PaymentsToAcquire(?=[A-Za-z]*(?:Property|Equipment|Productive))[A-Za-z]*"[^>]*>([\d,]+)<',
+        # 折旧摊销：兼容任意命名空间（us-gaap / 公司自定义如 msft:DepreciationAmortizationAndOther），
+        # 排除 Accumulated/Deferred 开头的资产负债表科目；现金流表先于附注出现，取首个匹配即当期值
+        "depreciation_amortization": r'name="[^"]*:(?!Accumulated|Deferred)[Dd]epreciation[^"]*"[^>]*>([\d,]+)<',
     }
 
+    xbrl_keys = set()  # 已按 scale 属性换算的 key，末尾文本归一化时跳过，避免双重缩放
+    periods = _build_context_periods(text)
     for key, pattern in xbrl_patterns.items():
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        if matches:
-            try:
-                # 取第一个匹配（最新一期）
-                value = int(matches[0].replace(",", ""))
-                # 检查原文中该数值是否在括号内（括号表示负数）
-                is_negative = False
-                for m in re.finditer(re.escape(matches[0]), text):
-                    start = max(0, m.start() - 5)
-                    end = min(len(text), m.end() + 5)
-                    context = text[start:end]
-                    if context.startswith("(") or "(" in text[max(0, m.start()-3):m.start()+1]:
-                        is_negative = True
-                        break
-                if key == "capex":
-                    cash_flows["capex"] = f"(${value:,}M)"
-                    cash_flows["capex_num"] = -value  # 负数表示现金流出
-                elif key == "depreciation_amortization":
-                    cash_flows[key] = f"${value:,}M"
-                    cash_flows[f"{key}_num"] = value
+        # 收集所有实例，按 context 的会计期年份选最新
+        # （列顺序因公司而异：MSFT 最新年在前，PDD 最新年在后）
+        matches = list(re.finditer(pattern, text, re.IGNORECASE))
+        if not matches:
+            continue
+        xbrl_keys.add(key)
+
+        target_year = max((_xbrl_ctx_year(text, m, periods) for m in matches), default="")
+        match = next(
+            (m for m in matches if _xbrl_ctx_year(text, m, periods) == target_year),
+            matches[0],
+        )
+        try:
+            value_str = match.group(1)
+            value = int(value_str.replace(",", ""))
+            # scale 属性：XBRL 数值 = 表格显示值 × 10^scale，统一换算到百万
+            scale_s = _xbrl_attr(text, match, "scale")
+            if scale_s:
+                value = round(value * (10 ** int(scale_s)) / 1e6)
+            # 币种（unitRef 含 RMB/CNY 时用 ¥ 显示）
+            unit_upper = _xbrl_attr(text, match, "unitRef").upper()
+            currency = "¥" if ("RMB" in unit_upper or "CNY" in unit_upper) else "$"
+            if key == "operating":
+                op_currency = currency  # FCF 币种随经营现金流
+            # 检查原文中该数值是否在括号内（括号表示负数）
+            is_negative = False
+            for m in re.finditer(re.escape(value_str), text):
+                start = max(0, m.start() - 5)
+                end = min(len(text), m.end() + 5)
+                context = text[start:end]
+                if context.startswith("(") or "(" in text[max(0, m.start()-3):m.start()+1]:
+                    is_negative = True
+                    break
+            if key == "capex":
+                cash_flows["capex"] = f"({currency}{value:,}M)"
+                cash_flows["capex_num"] = -value  # 负数表示现金流出
+            elif key == "depreciation_amortization":
+                cash_flows[key] = f"{currency}{value:,}M"
+                cash_flows[f"{key}_num"] = value
+            else:
+                if is_negative:
+                    cash_flows[key] = f"({currency}{value:,}M)"
+                    cash_flows[f"{key}_num"] = -value
                 else:
-                    if is_negative:
-                        cash_flows[key] = f"(${value:,}M)"
-                        cash_flows[f"{key}_num"] = -value
-                    else:
-                        cash_flows[key] = f"${value:,}M"
-                        cash_flows[f"{key}_num"] = value
-            except (ValueError, OverflowError) as e:
-                print(f"   ⚠️  XBRL {key} 数值解析失败: '{matches[0]}' | {e}")
-                continue
+                    cash_flows[key] = f"{currency}{value:,}M"
+                    cash_flows[f"{key}_num"] = value
+        except (ValueError, OverflowError) as e:
+            print(f"   ⚠️  XBRL {key} 数值解析失败: '{match.group(1)}' | {e}")
+            continue
 
     # 方法2: 从纯文本提取（如果 XBRL 没有匹配到）
     if "operating" not in cash_flows:
@@ -466,11 +869,13 @@ def extract_cash_flows(text: str) -> Dict[str, Any]:
             match = re.search(pattern, clean_text, re.IGNORECASE)
             if match:
                 try:
-                    value = match.group(1).replace(",", "")
+                    value = int(match.group(1).replace(",", ""))
                     if is_negative:
-                        cash_flows["operating"] = f"(${int(value):,}M)"
+                        cash_flows["operating"] = f"(${value:,}M)"
+                        cash_flows["operating_num"] = -value
                     else:
-                        cash_flows["operating"] = f"${int(value):,}M"
+                        cash_flows["operating"] = f"${value:,}M"
+                        cash_flows["operating_num"] = value
                     break
                 except (ValueError, OverflowError) as e:
                     start = max(0, match.start() - 20)
@@ -488,11 +893,13 @@ def extract_cash_flows(text: str) -> Dict[str, Any]:
             match = re.search(pattern, clean_text, re.IGNORECASE)
             if match:
                 try:
-                    value = match.group(1).replace(",", "")
+                    value = int(match.group(1).replace(",", ""))
                     if is_negative:
-                        cash_flows["investing"] = f"(${int(value):,}M)"
+                        cash_flows["investing"] = f"(${value:,}M)"
+                        cash_flows["investing_num"] = -value
                     else:
-                        cash_flows["investing"] = f"${int(value):,}M"
+                        cash_flows["investing"] = f"${value:,}M"
+                        cash_flows["investing_num"] = value
                     break
                 except (ValueError, OverflowError) as e:
                     start = max(0, match.start() - 20)
@@ -510,11 +917,13 @@ def extract_cash_flows(text: str) -> Dict[str, Any]:
             match = re.search(pattern, clean_text, re.IGNORECASE)
             if match:
                 try:
-                    value = match.group(1).replace(",", "")
+                    value = int(match.group(1).replace(",", ""))
                     if is_negative:
-                        cash_flows["financing"] = f"(${int(value):,}M)"
+                        cash_flows["financing"] = f"(${value:,}M)"
+                        cash_flows["financing_num"] = -value
                     else:
-                        cash_flows["financing"] = f"${int(value):,}M"
+                        cash_flows["financing"] = f"${value:,}M"
+                        cash_flows["financing_num"] = value
                     break
                 except (ValueError, OverflowError) as e:
                     start = max(0, match.start() - 20)
@@ -550,7 +959,7 @@ def extract_cash_flows(text: str) -> Dict[str, Any]:
     if "depreciation_amortization" not in cash_flows:
         depreciation_patterns = [
             r"Depreciation\s+and\s+amortization\s+(?:expense\s+)?[$]?\s*(\d[\d,]*)",
-            r"Depreciation,\s*amortization,?\s+(?:and\s+impairment)\s+[$]?\s*(\d[\d,]*)",
+            r"Depreciation,?\s+amortization,?\s+and\s+(?:other|impairment)\s+[$]?\s*\(?(\d[\d,]*)",
             r"Depreciation(?:\s+expense)?\s+[$]?\s*(\d[\d,]*)",
         ]
         for pattern in depreciation_patterns:
@@ -568,19 +977,33 @@ def extract_cash_flows(text: str) -> Dict[str, Any]:
                     print(f"   ⚠️  折旧摊销数值解析失败: '{match.group(1)}' | 上下文: '{context}' | {e}")
                     continue
 
-    # 自由现金流 = 经营现金流 - 资本支出（取绝对值）
-    if "operating" in cash_flows and "capex_num" in cash_flows:
-        op_match = re.search(r'[\$]?([\d,]+)M', cash_flows["operating"])
-        if op_match:
-            op_value = int(op_match.group(1).replace(",", ""))
-            if cash_flows["operating"].startswith("("):
-                op_value = -op_value
-            fcf = op_value + cash_flows["capex_num"]  # capex_num 已经是负数
-            if fcf >= 0:
-                cash_flows["free_cash_flow"] = f"${fcf:,}M"
+    # 单位归一化（文本回退路径：如 "(RMB in thousands)" 报表；XBRL 路径已按 scale 换算）
+    if unit_factor != 1.0:
+        for key in ("operating", "investing", "financing", "capex",
+                    "depreciation_amortization"):
+            num_key = key + "_num"
+            if num_key not in cash_flows or key in xbrl_keys:
+                continue
+            cash_flows[num_key] = round(cash_flows[num_key] * unit_factor)
+            num = cash_flows[num_key]
+            if key == "capex":
+                cash_flows[key] = f"(${abs(num):,}M)"
+            elif key == "depreciation_amortization":
+                cash_flows[key] = f"${num:,}M"
+            elif num >= 0:
+                cash_flows[key] = f"${num:,}M"
             else:
-                cash_flows["free_cash_flow"] = f"(${abs(fcf):,}M)"
-            cash_flows["free_cash_flow_num"] = fcf
+                cash_flows[key] = f"(${abs(num):,}M)"
+
+    # 自由现金流 = 经营现金流 - 资本支出（*_num 已统一为百万口径，放在归一化之后计算
+    # 避免被文本单位声明二次缩放）
+    if "operating_num" in cash_flows and "capex_num" in cash_flows:
+        fcf = cash_flows["operating_num"] + cash_flows["capex_num"]  # capex_num 已是负数
+        if fcf >= 0:
+            cash_flows["free_cash_flow"] = f"{op_currency}{fcf:,}M"
+        else:
+            cash_flows["free_cash_flow"] = f"({op_currency}{abs(fcf):,}M)"
+        cash_flows["free_cash_flow_num"] = fcf
 
     return cash_flows
 
