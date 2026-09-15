@@ -1,5 +1,6 @@
 import pytest
 from sqlalchemy import create_engine, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from db import Base
 from models import Stock, Filing, Analysis, DcfReport, Task
@@ -41,5 +42,5 @@ def test_unique_ticker(session):
     s.add(Stock(ticker="NKE"))
     s.commit()
     s.add(Stock(ticker="NKE"))
-    with pytest.raises(Exception):
+    with pytest.raises(IntegrityError):
         s.commit()
