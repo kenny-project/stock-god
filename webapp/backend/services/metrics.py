@@ -2,10 +2,12 @@
 只解析真实存在的表格行，解析不到的键直接缺席——严禁编造数据。"""
 import re
 
-_MONEY = re.compile(r"^\$?([\d,]+(?:\.\d+)?)M$")
+# 币种前缀：$/¥/£/€/HK$（20-F 人民币、港币披露与美元报告通用），数值保持单位无关
+_CURRENCY = r"[¥$£€]?(?:HK)?\$?"
+_MONEY = re.compile(rf"^{_CURRENCY}([\d,]+(?:\.\d+)?)M$")
 _PCT = re.compile(r"^(-?[\d.]+)%$")
-_NUM = re.compile(r"^-?\$?([\d,]+(?:\.\d+)?)$")
-_NEG_MONEY = re.compile(r"^\(\$?([\d,]+(?:\.\d+)?)M\)$")
+_NUM = re.compile(rf"^(-)?{_CURRENCY}([\d,]+(?:\.\d+)?)$")
+_NEG_MONEY = re.compile(rf"^\({_CURRENCY}([\d,]+(?:\.\d+)?)M\)$")
 
 
 def _to_number(raw: str):
@@ -17,13 +19,14 @@ def _to_number(raw: str):
     if m := _PCT.match(raw):
         return float(m.group(1))
     if m := _NUM.match(raw):
-        return float(m.group(1).replace(",", ""))
+        sign = -1.0 if m.group(1) else 1.0
+        return sign * float(m.group(2).replace(",", ""))
     return None
 
 
-def _table_rows(text: str, section: str) -> list[tuple[str, str]]:
-    """返回指定 `## 小节` 下表格的 (第一列, 第二列) 行。"""
-    out, in_sec = [], False
+def _section_lines(text: str, section: str):
+    """产出指定 `## 小节` 下的所有行。"""
+    in_sec = False
     for line in text.splitlines():
         if line.startswith("#"):
             # 任意级别的标题（含 ### 子小节）都是小节边界，
@@ -31,7 +34,15 @@ def _table_rows(text: str, section: str) -> list[tuple[str, str]]:
             # 会被误并入上一小节（每股内在价值 ≠ 股权内在价值）。
             in_sec = line.lstrip("#").strip().startswith(section)
             continue
-        if in_sec and line.strip().startswith("|"):
+        if in_sec:
+            yield line
+
+
+def _table_rows(text: str, section: str) -> list[tuple[str, str]]:
+    """返回指定 `## 小节` 下表格的 (第一列, 第二列) 行。"""
+    out = []
+    for line in _section_lines(text, section):
+        if line.strip().startswith("|"):
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
             if len(cells) >= 2 and set(cells[0]) - {":", "-", " "} and cells[0] not in ("指标", "项目"):
                 out.append((cells[0], cells[1]))
@@ -57,13 +68,16 @@ def parse_dcf_valuation(text: str) -> dict:
             if iv is not None:
                 v["intrinsic_value_musd"] = iv
     years = []
-    for line in text.splitlines():
-        if line.startswith("| FY") or line.startswith("| 20"):
-            cells = [c.strip() for c in line.strip().strip("|").split("|")]
-            if len(cells) >= 5:
-                oe = _to_number(cells[4])
-                if oe is not None:
-                    years.append({"year": cells[0], "oe": oe, "revenue": _to_number(cells[5]) if len(cells) > 5 else None})
+    # 只认 Owner Earnings 小节里的 `| FY...` 年度行；
+    # 敏感性分析表有 `| 20% | $47 | ...` 这类增长率行，全篇扫描会把它编造成年度数据
+    for line in _section_lines(text, "Owner Earnings"):
+        if not line.strip().startswith("| FY"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 5:
+            oe = _to_number(cells[4])
+            if oe is not None:
+                years.append({"year": cells[0], "oe": oe, "revenue": _to_number(cells[5]) if len(cells) > 5 else None})
     if years:
         v["owner_earnings_by_year"] = years
     return v
