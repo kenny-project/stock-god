@@ -4,7 +4,7 @@ from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data")
 DB_PATH = os.environ.get("STOCKGOD_DB", os.path.join(DATA_DIR, "stock_god.db"))
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 class Base(DeclarativeBase):
