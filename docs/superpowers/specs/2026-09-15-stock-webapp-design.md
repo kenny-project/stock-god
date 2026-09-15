@@ -86,7 +86,7 @@ GET  /api/stocks/{ticker}/analyses       分析报告列表
 GET  /api/stocks/{ticker}/analyses/{id}  分析报告内容（metrics JSON + Markdown 正文）
 GET  /api/stocks/{ticker}/dcf            DCF 报告列表
 GET  /api/stocks/{ticker}/dcf/{id}       DCF 报告内容（valuation JSON + Markdown 正文）
-GET  /api/files/{path}                   原始文件流式下载（path 受白名单目录约束）
+GET  /api/filings/{id}/file              按资源 ID 流式返回财报原文件
 GET  /api/tasks/{id}/log?offset=         任务日志尾部（分页读取）
 
 POST /api/tasks                          创建任务 {task_type, ticker, params}
@@ -97,13 +97,15 @@ POST /api/tasks/{id}/cancel              取消 pending/running 任务
 
 - 统一错误格式 `{detail, code}`；校验失败 422，资源不存在 404
 - 同一股票同类型任务进行中时重复提交 → 409 拒绝
-- `GET /api/files/{path}` 仅允许 `reports/` 白名单目录，防路径穿越
+- 文件接口一律按资源 ID 取文件（路径只存在 DB 中），无路径穿越风险
 
 ## 6. 后台任务模型
 
-- **执行**：`asyncio.create_subprocess_exec` 调用现有脚本，进程隔离
+- **执行**：`asyncio.create_subprocess_exec` 调用现有脚本，进程隔离；service 层负责 ticker → 脚本参数格式映射（如 `NKE` → `US.NKE`）
 - **并发**：全局 semaphore 限 2 个并发，超出排队（避免打爆 SEC/FMP 限流）
 - **状态机**：`pending → running → success | failed | cancelled`，每次流转写 DB
+- **取消**：pending 任务直接标记 cancelled；running 任务终止子进程（含子进程组），等待退出后标记 cancelled
+- **SQLite 并发**：启用 WAL 模式，避免任务登记写与 API 读互相阻塞
 - **日志**：stdout/stderr 实时追加写 `logs/tasks/{task_id}.log`，DB 存 `log_path` 指针
 - **成功登记**：脚本退出码 0 → 校验 `reports/` 产物存在且非空 → 解析 metrics/valuation 入库 → 更新 filing/analysis/dcf_report 表；产物缺失/为空视为失败（`EMPTY_OUTPUT`）
 - **扩展**：新增任务类型（如股价拉取）注册新 runner，框架不动
