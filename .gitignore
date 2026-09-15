@@ -4,6 +4,10 @@ __pycache__/
 .DS_Store
 *.swp
 reports/*
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
 scripts/sec_analysis/__pycache__/*
 scripts/sec_analysis/__pycache__/report.cpython-314.pyc
 scripts/sec_analysis/__pycache__/main.cpython-314.pyc
