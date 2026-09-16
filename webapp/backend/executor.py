@@ -1,0 +1,97 @@
+"""后台任务执行器：semaphore 并发限制、状态机流转、日志落盘、进程组取消。"""
+import asyncio
+import os
+import signal
+from datetime import datetime
+import services.register as register
+from db import ROOT
+from services.runners import build_command, classify_error
+
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "logs", "tasks")
+MAX_CONCURRENCY = 2
+
+# 存函数名而非函数引用：调用时经 getattr 取，便于测试 monkeypatch 生效
+_REGISTER = {"download": "register_download",
+             "analysis": "register_analysis",
+             "dcf": "register_dcf"}
+
+
+class TaskExecutor:
+    def __init__(self, session_factory, log_dir=None):
+        # session_factory: 可调用，返回新的 Session（每个任务独立会话）
+        self._factory = session_factory
+        self._sem = asyncio.Semaphore(MAX_CONCURRENCY)
+        self._procs: dict[int, asyncio.subprocess.Process] = {}
+        self.log_dir = os.path.abspath(log_dir or LOG_DIR)
+        os.makedirs(self.log_dir, exist_ok=True)
+
+    async def run_one(self, task):
+        async with self._sem:
+            session = self._factory()
+            task = session.merge(task)
+            task.status = "running"
+            task.started_at = datetime.now()
+            log_path = os.path.join(self.log_dir, f"task_{task.id}.log")
+            task.log_path = log_path
+            session.commit()
+            try:
+                if task.task_type == "sync_stocks":
+                    # 同步股票列表不走子进程，直接在线程池拉 EDGAR
+                    from services.edgar import fetch_company_tickers, upsert_stocks
+                    data = await asyncio.get_running_loop().run_in_executor(None, fetch_company_tickers)
+                    upsert_stocks(session, data)
+                    task.status = "success"
+                    session.close()
+                    return
+                with open(log_path, "ab") as log_fh:
+                    proc = await self._exec(build_command(task.task_type,
+                                                          task.stock.symbol() if task.stock else "",
+                                                          task.params or {}), log_fh)
+                    self._procs[task.id] = proc
+                    out, err = await proc.communicate()
+                    log_fh.write(err)
+                    del self._procs[task.id]
+                if proc.returncode == 0:
+                    registered = getattr(register, _REGISTER[task.task_type])(session, task.stock) \
+                        if task.stock else 0
+                    if task.stock and registered == 0 and task.task_type != "sync_stocks":
+                        task.status = "failed"
+                        task.error_code = "EMPTY_OUTPUT"
+                        task.error_summary = "脚本退出码为 0 但未产生新的产物文件，按失败处理"
+                    else:
+                        task.status = "success"
+                else:
+                    task.status = "failed"
+                    tail = (err or b"").decode("utf-8", "replace")[-2000:]
+                    task.error_code, task.error_summary = classify_error(proc.returncode, tail)
+            except asyncio.CancelledError:
+                task.status = "cancelled"
+                task.error_summary = "任务被手动取消"
+            except Exception as e:  # 任何意外都落为失败，不留悬挂任务
+                task.status = "failed"
+                task.error_code = "SCRIPT_EXIT_NONZERO"
+                task.error_summary = f"执行器内部错误: {e}"
+            finally:
+                task.finished_at = datetime.now()
+                session.commit()
+                session.close()
+
+    async def _exec(self, cmd: list[str], log_fh):
+        return await asyncio.create_subprocess_exec(
+            *cmd, stdout=log_fh, stderr=asyncio.subprocess.PIPE,
+            cwd=ROOT,
+            start_new_session=True)
+
+    async def cancel(self, task) -> bool:
+        proc = self._procs.get(task.id)
+        if proc and proc.returncode is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                await asyncio.wait_for(proc.wait(), timeout=10)
+            except (ProcessLookupError, asyncio.TimeoutError):
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            return True
+        return False  # pending 任务由 API 层直接置 cancelled
