@@ -1,7 +1,7 @@
 import asyncio
 import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -48,14 +48,28 @@ app.include_router(reports_api.router)
 DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend-dist"))
 if os.path.isdir(DIST):
     _dist_real = os.path.realpath(DIST) + os.sep
-    app.mount("/assets", StaticFiles(directory=os.path.join(DIST, "assets")), name="assets")
+    _assets_dir = os.path.join(DIST, "assets")
+
+    class _HashedAssets(StaticFiles):
+        """assets 下的带 hash 文件长缓存（StaticFiles 默认不带 Cache-Control）"""
+
+        async def get_response(self, path, scope):
+            resp = await super().get_response(path, scope)
+            if resp.status_code == 200:
+                resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            return resp
+
+    if os.path.isdir(_assets_dir):
+        app.mount("/assets", _HashedAssets(directory=_assets_dir), name="assets")
 
     @app.get("/{path:path}", include_in_schema=False)
     def spa(path: str):
+        if path.startswith("api/"):
+            raise HTTPException(status_code=404)
         full = os.path.realpath(os.path.join(DIST, path))
         if path and full.startswith(_dist_real) and os.path.isfile(full):
-            return FileResponse(full)
-        return FileResponse(os.path.join(DIST, "index.html"))
+            return FileResponse(full, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+        return FileResponse(os.path.join(DIST, "index.html"), headers={"Cache-Control": "no-cache"})
 
 
 def set_engine_for_test(engine, factory):
