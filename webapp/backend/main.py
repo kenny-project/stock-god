@@ -1,7 +1,10 @@
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from db import make_engine, make_session_factory, Base
 import models  # noqa
 from deps import set_engine
@@ -40,6 +43,19 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"],
 app.include_router(stocks_api.router)
 app.include_router(tasks_api.router)
 app.include_router(reports_api.router)
+
+# 生产模式：托管前端构建产物（SPA 回退到 index.html；realpath 校验防路径穿越）
+DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend-dist"))
+if os.path.isdir(DIST):
+    _dist_real = os.path.realpath(DIST) + os.sep
+    app.mount("/assets", StaticFiles(directory=os.path.join(DIST, "assets")), name="assets")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def spa(path: str):
+        full = os.path.realpath(os.path.join(DIST, path))
+        if path and full.startswith(_dist_real) and os.path.isfile(full):
+            return FileResponse(full)
+        return FileResponse(os.path.join(DIST, "index.html"))
 
 
 def set_engine_for_test(engine, factory):
