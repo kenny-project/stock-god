@@ -34,8 +34,8 @@ def env():
         s.flush()
         f = Filing(stock_id=st.id, form_type="UNKNOWN", period="2021-08-31",
                    local_path="reports/sec_filings/NKE/nke-20210831.htm")
-        a = Analysis(stock_id=st.id, form_type="10-K", fiscal_year=2024,
-                     local_path="reports/sec_analysis/NKE/10-K_FY2024.md", metrics={"营收": 51362})
+        a = Analysis(stock_id=st.id, form_type="10-K", fiscal_year=2025,
+                     local_path="reports/sec_analysis/NKE/10-K_FY2025.md", metrics={"营收": 51362})
         t = Task(task_type="download", stock_id=st.id, status="failed",
                  error_code="SCRIPT_EXIT_NONZERO", error_summary="exit=1",
                  log_path="logs/tasks/task_test.log")
@@ -56,7 +56,7 @@ async def test_analysis_content(env):
         assert r.status_code == 200
         body = r.json()
         assert body["metrics"]["营收"] == 51362
-        assert "# NKE 10-K FY2024" in body["markdown"]
+        assert "# NKE 10-K FY2025" in body["markdown"]
 
 
 async def test_analysis_404(env):
@@ -187,7 +187,7 @@ async def test_analysis_path_escape_404(env, tmp_path):
     with Factory() as s:
         from models import Stock, Analysis
         st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
-        a = Analysis(stock_id=st.id, form_type="10-K", fiscal_year=2025,
+        a = Analysis(stock_id=st.id, form_type="10-K", fiscal_year=2026,
                      local_path=str(outside), metrics={})
         s.add(a)
         s.commit()
