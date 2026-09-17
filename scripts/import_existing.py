@@ -17,9 +17,12 @@ def main():
     engine = make_engine()
     Base.metadata.create_all(engine)
     Factory = make_session_factory(engine)
-    reports_root = os.path.join(BACKEND, "..", "..", "reports", "sec_filings")
-    tickers = sorted(d for d in os.listdir(os.path.abspath(reports_root))
-                     if os.path.isdir(os.path.abspath(os.path.join(reports_root, d))))
+    reports_root = os.path.abspath(os.path.join(BACKEND, "..", "..", "reports", "sec_filings"))
+    if not os.path.isdir(reports_root):
+        print(f"错误：未找到财报目录 {reports_root}，请先运行 sec_filings 下载。", file=sys.stderr)
+        sys.exit(1)
+    tickers = sorted(d for d in os.listdir(reports_root)
+                     if os.path.isdir(os.path.join(reports_root, d)))
     warnings = []
     with Factory() as s:
         for t in tickers:
@@ -34,6 +37,7 @@ def main():
                 n3 = register_dcf(s, st)
                 print(f"{t}: filings+{n1} analyses+{n2} dcf+{n3}")
             except Exception as e:
+                s.rollback()
                 warnings.append(f"{t}: {e}")
     if warnings:
         print("\n=== 告警（已跳过） ===")
