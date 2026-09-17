@@ -23,7 +23,8 @@ def get_executor() -> TaskExecutor:
     return _executor
 
 
-def _schedule(task: Task) -> None:
+def schedule_task(task: Task) -> None:
+    """在事件循环上调度 executor.run_one（fire-and-forget）。必须在异步上下文中调用。"""
     t = asyncio.get_running_loop().create_task(get_executor().run_one(task))
     _bg.add(t)
     t.add_done_callback(_bg.discard)
@@ -47,7 +48,7 @@ async def create_task(body: TaskCreate, db: Session = Depends(get_db)):
         state = "排队" if dup.status == "pending" else "执行"
         raise HTTPException(409, f"同类型任务已在{state}中 (task #{dup.id})")
     task = create_task_internal(db, body.task_type, stock, body.params)
-    _schedule(task)
+    schedule_task(task)
     return TaskOut.model_validate(task)
 
 

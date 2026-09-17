@@ -21,13 +21,14 @@ def list_stocks(q: str = "", page: int = Query(1, ge=1), size: int = Query(50, g
 
 
 @router.post("/sync")
-def sync_stocks(db: Session = Depends(get_db)):
+async def sync_stocks(db: Session = Depends(get_db)):
     dup = db.scalar(select(Task).where(Task.task_type == "sync_stocks", Task.stock_id.is_(None),
                                        Task.status.in_(("pending", "running"))))
     if dup:
         raise HTTPException(409, f"股票同步任务已在进行中 (task #{dup.id})")
-    from api.tasks_api import create_task_internal
+    from api.tasks_api import create_task_internal, schedule_task
     task = create_task_internal(db, "sync_stocks", None, {})
+    schedule_task(task)  # 必须调度执行，否则任务永远 pending；async 端点保证有 running loop
     return {"task_id": task.id}
 
 

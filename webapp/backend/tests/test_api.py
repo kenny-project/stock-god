@@ -11,15 +11,22 @@ from main import app, set_engine_for_test
 
 
 class DummyExecutor:
+    def __init__(self):
+        self.calls = []  # 记录 run_one 收到的任务，供断言调度行为
+
     async def run_one(self, task):
-        return
+        self.calls.append(task)
 
     async def cancel(self, task):
         return False
 
 
+_dummy_executor: DummyExecutor | None = None  # 指向当前 fixture 装的 DummyExecutor，供测试断言
+
+
 @pytest.fixture
 def client():
+    global _dummy_executor
     # StaticPool：内存库全局共享单连接。FastAPI 同步端点跑在线程池里，
     # sqlite:// 默认的 SingletonThreadPool 会给每个线程一个空库（no such table）
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
@@ -28,7 +35,8 @@ def client():
     Factory = sessionmaker(bind=engine, expire_on_commit=False)
     set_engine_for_test(engine, Factory)
     import api.tasks_api as tasks_api
-    tasks_api.set_executor(DummyExecutor())
+    _dummy_executor = DummyExecutor()
+    tasks_api.set_executor(_dummy_executor)
     from models import Stock
     with Factory() as s:
         s.add(Stock(ticker="NKE", name_en="NIKE, Inc.", market="US"))
@@ -125,3 +133,18 @@ async def test_sync_stocks_dup_guard(client):
         r2 = await c.post("/api/stocks/sync")
         assert r2.status_code == 409
         assert "股票同步任务已在进行中" in r2.json()["detail"]
+
+
+async def test_sync_stocks_schedules_executor(client):
+    """POST /api/stocks/sync 必须调度 executor.run_one，否则任务永远 pending。"""
+    async with client as c:
+        r = await c.post("/api/stocks/sync")
+        assert r.status_code == 200
+        task_id = r.json()["task_id"]
+        await asyncio.sleep(0)  # 让 fire-and-forget 协程先跑一步，记录调用
+        assert _dummy_executor is not None
+        assert len(_dummy_executor.calls) == 1
+        task = _dummy_executor.calls[0]
+        assert task.task_type == "sync_stocks"
+        assert task.stock_id is None
+        assert task.id == task_id
