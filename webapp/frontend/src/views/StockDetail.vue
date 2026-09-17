@@ -57,7 +57,7 @@
 
     <!-- 图表 -->
     <div v-else-if="tab === 'charts'">
-      <TrendChart v-if="metricsSeries.length" :series="metricsSeries" title="营收/净利润趋势（百万$）" />
+      <TrendChart v-if="hasMetrics" :series="metricsSeries" title="营收/净利润趋势（百万$）" />
       <p v-else class="empty">暂无分析数据，先生成财报分析</p>
     </div>
 
@@ -86,7 +86,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onUnmounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { api } from '../api'
 import { useTaskStore } from '../stores/tasks'
 import MarkdownViewer from '../components/MarkdownViewer.vue'
@@ -107,6 +107,8 @@ let toastTimer, pollTimer, seq = 0
 
 const TASK_LABELS = { download: '下载财报', analysis: '生成分析', dcf: 'DCF 估值' }
 const taskLabel = (t) => TASK_LABELS[t] || t
+// metricsSeries 恒含两条序列（构造函数 map 产出），需按真实数据有无判断空态
+const hasMetrics = computed(() => metricsSeries.value.some((s) => s.values.some((v) => v != null)))
 const fmt = (s) => (s ? new Date(s).toLocaleString('zh-CN', { hour12: false }) : '')
 
 function showToast(text, type = 'success') {
