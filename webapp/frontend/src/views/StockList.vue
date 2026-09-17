@@ -42,7 +42,7 @@ async function sync() {
     await api.syncStocks()
     showToast('同步任务已提交，请到任务中心查看进度', 'success')
   } catch (e) {
-    if (e?.response?.status === 409) showToast('已有同步任务在进行中', 'error')
+    if (e?.status === 409) showToast('已有同步任务在进行中', 'error')
     else showToast('同步失败', 'error')
   } finally { syncing.value = false }
 }
