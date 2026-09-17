@@ -8,6 +8,7 @@ from deps import set_engine
 from executor import TaskExecutor
 from api import stocks as stocks_api
 from api import tasks_api
+from api import reports as reports_api
 from services.edgar import fetch_company_tickers, upsert_stocks
 
 
@@ -38,6 +39,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 app.include_router(stocks_api.router)
 app.include_router(tasks_api.router)
+app.include_router(reports_api.router)
 
 
 def set_engine_for_test(engine, factory):
