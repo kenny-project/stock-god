@@ -3,8 +3,10 @@ import asyncio
 import os
 import signal
 from datetime import datetime
+from sqlalchemy import select
 import services.register as register
 from db import ROOT
+from models import Task
 from services.runners import build_command, classify_error
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "logs", "tasks")
@@ -105,6 +107,15 @@ class TaskExecutor:
                 task.error_summary = f"执行器内部错误: {e}"
             finally:
                 task.finished_at = datetime.now()
+                # 取消竞态：API 层可能已把 DB 状态置为 cancelled。必须用全新会话
+                # 读权威状态——本会话里 dirty 的 failed/success 尚未落库，若经本会话
+                # 读取（含 autoflush）只会看到自己的脏值，无法发现取消标记
+                with self._factory() as chk:
+                    db_status = chk.scalar(select(Task.status).where(Task.id == task.id))
+                if db_status == "cancelled":
+                    task.status = "cancelled"
+                    if not task.error_summary:
+                        task.error_summary = "任务被手动取消"
                 try:
                     session.commit()
                 finally:

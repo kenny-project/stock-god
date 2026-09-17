@@ -9,6 +9,7 @@ from executor import TaskExecutor
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 _executor: TaskExecutor | None = None
+_bg: set = set()  # fire-and-forget 任务的强引用，防止事件循环丢弃前被 GC；完成后自动移除
 
 
 def set_executor(ex: TaskExecutor):
@@ -17,8 +18,15 @@ def set_executor(ex: TaskExecutor):
 
 
 def get_executor() -> TaskExecutor:
-    assert _executor is not None, "executor not initialized"
+    if _executor is None:
+        raise RuntimeError("executor not initialized")
     return _executor
+
+
+def _schedule(task: Task) -> None:
+    t = asyncio.get_running_loop().create_task(get_executor().run_one(task))
+    _bg.add(t)
+    t.add_done_callback(_bg.discard)
 
 
 def create_task_internal(db: Session, task_type: str, stock, params: dict) -> Task:
@@ -39,7 +47,7 @@ async def create_task(body: TaskCreate, db: Session = Depends(get_db)):
         state = "排队" if dup.status == "pending" else "执行"
         raise HTTPException(409, f"同类型任务已在{state}中 (task #{dup.id})")
     task = create_task_internal(db, body.task_type, stock, body.params)
-    asyncio.get_running_loop().create_task(get_executor().run_one(task))
+    _schedule(task)
     return TaskOut.model_validate(task)
 
 

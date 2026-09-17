@@ -164,3 +164,35 @@ async def test_idempotent_rerun_succeeds(session_factory, tmp_path, monkeypatch)
         assert task.status == "success"
         assert task.error_code is None
         assert os.path.exists(task.log_path)
+
+
+class CancelMidwayProc:
+    """communicate 期间把 DB 状态置为 cancelled，模拟 API 层并发取消。"""
+    returncode = 1
+
+    def __init__(self, factory, task_id):
+        self._factory = factory
+        self._task_id = task_id
+
+    async def communicate(self):
+        with self._factory() as s:
+            row = s.get(Task, self._task_id)
+            row.status = "cancelled"
+            s.commit()
+        return b"out", b""
+
+
+async def test_cancel_race_respected_in_finally(session_factory, tmp_path, monkeypatch):
+    """运行中 DB 已被置 cancelled：finally 收尾必须尊重权威状态，不得回写为 failed。"""
+    ex = TaskExecutor(session_factory, log_dir=str(tmp_path))
+    with session_factory() as s:
+        task_id = s.scalar(select(Task)).id
+    async def fake_exec(cmd, log_fh):
+        return CancelMidwayProc(session_factory, task_id)
+    monkeypatch.setattr(ex, "_exec", fake_exec)
+    with session_factory() as s:
+        task = s.scalar(select(Task))
+        await ex.run_one(task)
+        s.refresh(task)
+        assert task.status == "cancelled"
+        assert task.finished_at is not None

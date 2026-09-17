@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import create_engine
@@ -76,3 +78,50 @@ async def test_task_flow_and_cancel(client):
         assert r.json()["status"] == "cancelled"
         r = await c.post(f"/api/tasks/{tid}/cancel")
         assert r.status_code == 409
+
+
+async def test_created_task_held_by_module_ref(client):
+    """fire-and-forget 任务必须被模块级强引用防 GC，结束后自动移除。"""
+    import api.tasks_api as tasks_api
+
+    gate = asyncio.Event()
+
+    class BlockedExecutor(DummyExecutor):
+        async def run_one(self, task):
+            await gate.wait()
+
+    tasks_api.set_executor(BlockedExecutor())
+    try:
+        async with client as c:
+            r = await c.post("/api/tasks", json={"task_type": "analysis", "ticker": "NKE", "params": {}})
+            assert r.status_code == 200
+            # 运行中：模块级强引用存在，任务不会被 GC
+            assert len(tasks_api._bg) == 1
+            gate.set()
+            pending = list(tasks_api._bg)
+            await asyncio.gather(*pending)
+            await asyncio.sleep(0)  # 让 done_callback 先于断言执行
+            assert tasks_api._bg == set()
+    finally:
+        tasks_api.set_executor(DummyExecutor())
+
+
+def test_get_executor_uninitialized_raises():
+    import api.tasks_api as tasks_api
+    saved = tasks_api._executor
+    tasks_api._executor = None
+    try:
+        with pytest.raises(RuntimeError):
+            tasks_api.get_executor()
+    finally:
+        tasks_api._executor = saved
+
+
+async def test_sync_stocks_dup_guard(client):
+    """同步股票任务进行中（pending/running）时重复触发 → 409。"""
+    async with client as c:
+        r1 = await c.post("/api/stocks/sync")
+        assert r1.status_code == 200
+        r2 = await c.post("/api/stocks/sync")
+        assert r2.status_code == 409
+        assert "股票同步任务已在进行中" in r2.json()["detail"]

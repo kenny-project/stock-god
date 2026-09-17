@@ -1,15 +1,15 @@
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StockOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     id: int
     ticker: str
     name_cn: str | None
     name_en: str | None
     market: str
     exchange: str | None
-    class Config: from_attributes = True
 
 
 class StockPage(BaseModel):
@@ -18,24 +18,25 @@ class StockPage(BaseModel):
 
 
 class FilingOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     id: int
     form_type: str
     period: str | None
     local_path: str
     downloaded_at: datetime
-    class Config: from_attributes = True
 
 
 class AnalysisOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     id: int
     form_type: str
     fiscal_year: int
     metrics: dict | None
     generated_at: datetime
-    class Config: from_attributes = True
 
 
 class DcfOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     id: int
     growth: float | None
     discount: float | None
@@ -43,10 +44,10 @@ class DcfOut(BaseModel):
     safety: float | None
     valuation: dict | None
     generated_at: datetime
-    class Config: from_attributes = True
 
 
 class TaskOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     id: int
     task_type: str
     status: str
@@ -58,7 +59,6 @@ class TaskOut(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     stock: StockOut | None
-    class Config: from_attributes = True
 
 
 class StockDetail(StockOut):

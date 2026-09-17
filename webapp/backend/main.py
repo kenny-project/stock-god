@@ -19,14 +19,17 @@ async def lifespan(app: FastAPI):
     set_engine(engine, Factory)
     ex = TaskExecutor(Factory)
     tasks_api.set_executor(ex)
-    # 首次启动：股票表为空则自动拉 EDGAR
+    # 首次启动：股票表为空则自动拉 EDGAR（失败不阻塞启动，可稍后手动同步）
     def _seed():
         with Factory() as s:
             from sqlalchemy import select, func
             from models import Stock
             if s.scalar(select(func.count(Stock.id))) == 0:
                 upsert_stocks(s, fetch_company_tickers())
-    await asyncio.get_running_loop().run_in_executor(None, _seed)
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, _seed)
+    except Exception as e:
+        print(f"[startup] EDGAR 拉取失败，股票表为空，可稍后手动同步: {e}")
     yield
 
 
