@@ -90,7 +90,38 @@ async def test_task_log(env, tmp_path, monkeypatch):
     async with client as c:
         r = await c.get(f"/api/tasks/{tid}/log")
         assert r.status_code == 200
-        assert "line3" in r.json()["content"]
+        body = r.json()
+        assert "line3" in body["content"]  # offset<=0 → 尾部 64KB
+        assert body["next_offset"] == log.stat().st_size
+        # 用 next_offset 续读到 EOF
+        r2 = await c.get(f"/api/tasks/{tid}/log", params={"offset": body["next_offset"]})
+        assert r2.status_code == 200
+        assert r2.json()["content"] == ""
+        assert r2.json()["next_offset"] == log.stat().st_size
+
+
+async def test_task_log_tail_64k(env, tmp_path, monkeypatch):
+    client, _, ids = env
+    _, _, tid = ids
+    log = tmp_path / "task_big.log"
+    log.write_text("HEAD\n" + "x" * 70000 + "\nTAIL\n", encoding="utf-8")
+    monkeypatch.setattr("api.reports.safe_log_path", lambda p: str(log))
+    async with client as c:
+        body = (await c.get(f"/api/tasks/{tid}/log")).json()
+        assert "HEAD" not in body["content"]  # 只保留尾部 64KB
+        assert "TAIL" in body["content"]
+        assert body["size"] == log.stat().st_size
+        assert body["next_offset"] == log.stat().st_size
+
+
+def test_safe_log_path_rejects_escape():
+    from api.reports import safe_log_path
+    from db import ROOT
+    assert safe_log_path("../../etc/passwd") is None
+    assert safe_log_path("logs/tasks/../other/x.log") is None
+    assert safe_log_path("logs/tasks2/x.log") is None  # 兄弟目录
+    assert safe_log_path("logs/tasks/ok.log") == os.path.realpath(
+        os.path.join(ROOT, "logs/tasks/ok.log"))
 
 
 async def test_dcf_list_and_content(env):
@@ -110,3 +141,57 @@ async def test_dcf_list_and_content(env):
         assert r.status_code == 200
         assert r.json()["valuation"]["intrinsic_value_musd"] == 47099
         assert "DCF 估值分析" in r.json()["markdown"]
+
+
+async def test_cross_stock_ownership_404(env):
+    client, Factory, ids = env
+    _, nke_aid, _ = ids
+    with Factory() as s:
+        from models import Stock, Analysis, DcfReport
+        st = Stock(ticker="MSFT", market="US")
+        s.add(st)
+        s.flush()
+        a = Analysis(stock_id=st.id, form_type="10-K", fiscal_year=2024,
+                     local_path="reports/sec_analysis/MSFT/10-K_FY2024.md", metrics={})
+        d = DcfReport(stock_id=st.id, local_path="reports/dcf/US.MSFT_DCF.md",
+                      valuation={"intrinsic_value_musd": 1})
+        s.add_all([a, d])
+        s.commit()
+        aid, did = a.id, d.id
+    async with client as c:
+        # MSFT 的 analysis/dcf 挂在 NKE ticker 下 → 404
+        assert (await c.get(f"/api/stocks/NKE/analyses/{aid}")).status_code == 404
+        assert (await c.get(f"/api/stocks/NKE/dcf/{did}")).status_code == 404
+        # NKE 的 analysis 挂在 MSFT ticker 下 → 404
+        assert (await c.get(f"/api/stocks/MSFT/analyses/{nke_aid}")).status_code == 404
+
+
+async def test_filing_escape_404(env):
+    client, Factory, _ = env
+    with Factory() as s:
+        from models import Stock, Filing
+        st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+        f = Filing(stock_id=st.id, form_type="10-K", period="2024",
+                   local_path="../evil.htm")
+        s.add(f)
+        s.commit()
+        fid = f.id
+    async with client as c:
+        assert (await c.get(f"/api/filings/{fid}/file")).status_code == 404
+
+
+async def test_analysis_path_escape_404(env, tmp_path):
+    client, Factory, _ = env
+    outside = tmp_path / "evil.md"  # ROOT 之外的真实文件
+    outside.write_text("secret", encoding="utf-8")
+    with Factory() as s:
+        from models import Stock, Analysis
+        st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+        a = Analysis(stock_id=st.id, form_type="10-K", fiscal_year=2025,
+                     local_path=str(outside), metrics={})
+        s.add(a)
+        s.commit()
+        aid = a.id
+    async with client as c:
+        r = await c.get(f"/api/stocks/NKE/analyses/{aid}")
+        assert r.status_code == 404  # 文件存在但逃逸 ROOT，必须拒绝

@@ -17,8 +17,11 @@ def safe_log_path(p: str | None) -> str | None:
     """日志路径白名单：只允许 logs/tasks/ 下的真实文件，其余一律拒绝。"""
     if not p:
         return None
+    if not os.path.isabs(p):
+        p = os.path.join(ROOT, p)
     real = os.path.realpath(p)
-    if not real.startswith(os.path.realpath(os.path.join(ROOT, "logs", "tasks"))):
+    base = os.path.realpath(os.path.join(ROOT, "logs", "tasks")) + os.sep
+    if not real.startswith(base):
         return None
     return real
 
@@ -39,12 +42,12 @@ def list_analyses(ticker: str, db: Session = Depends(get_db)):
 
 @router.get("/stocks/{ticker}/analyses/{analysis_id}")
 def analysis_content(ticker: str, analysis_id: int, db: Session = Depends(get_db)):
-    _get_stock(db, ticker)
+    st = _get_stock(db, ticker)
     a = db.get(Analysis, analysis_id)
-    if not a:
+    if not a or a.stock_id != st.id:
         raise HTTPException(404, "analysis not found")
-    full = os.path.join(ROOT, a.local_path)
-    if not os.path.isfile(full):
+    full = os.path.realpath(os.path.join(ROOT, a.local_path))
+    if not full.startswith(os.path.realpath(ROOT) + os.sep) or not os.path.isfile(full):
         raise HTTPException(404, f"报告文件缺失: {a.local_path}")
     with open(full, encoding="utf-8") as f:
         return {"id": a.id, "form_type": a.form_type, "fiscal_year": a.fiscal_year,
@@ -60,12 +63,12 @@ def list_dcf(ticker: str, db: Session = Depends(get_db)):
 
 @router.get("/stocks/{ticker}/dcf/{dcf_id}")
 def dcf_content(ticker: str, dcf_id: int, db: Session = Depends(get_db)):
-    _get_stock(db, ticker)
+    st = _get_stock(db, ticker)
     d = db.get(DcfReport, dcf_id)
-    if not d:
+    if not d or d.stock_id != st.id:
         raise HTTPException(404, "dcf report not found")
-    full = os.path.join(ROOT, d.local_path)
-    if not os.path.isfile(full):
+    full = os.path.realpath(os.path.join(ROOT, d.local_path))
+    if not full.startswith(os.path.realpath(ROOT) + os.sep) or not os.path.isfile(full):
         raise HTTPException(404, f"报告文件缺失: {d.local_path}")
     with open(full, encoding="utf-8") as f:
         return {"id": d.id, "valuation": d.valuation, "markdown": f.read()}
@@ -77,7 +80,7 @@ def filing_file(filing_id: int, db: Session = Depends(get_db)):
     if not f:
         raise HTTPException(404, "filing not found")
     full = os.path.realpath(os.path.join(ROOT, f.local_path))
-    if not full.startswith(os.path.realpath(ROOT)) or not os.path.isfile(full):
+    if not full.startswith(os.path.realpath(ROOT) + os.sep) or not os.path.isfile(full):
         raise HTTPException(404, f"财报文件缺失: {f.local_path}")
     ext = os.path.splitext(full)[1].lower()
     return FileResponse(full, media_type=_MD_TYPES.get(ext, "application/octet-stream"),
@@ -91,9 +94,13 @@ def task_log(task_id: int, offset: int = 0, db: Session = Depends(get_db)):
         raise HTTPException(404, "task not found")
     path = safe_log_path(task.log_path)
     if not path or not os.path.isfile(path):
-        return {"content": "", "size": 0}
+        return {"content": "", "size": 0, "next_offset": 0}
     size = os.path.getsize(path)
     with open(path, "rb") as f:
-        f.seek(max(0, min(offset, size)))
+        if offset <= 0:
+            f.seek(max(0, size - 64 * 1024))  # offset<=0 → 尾部 64KB
+        else:
+            f.seek(min(offset, size))
         content = f.read(64 * 1024).decode("utf-8", "replace")
-    return {"content": content, "size": size}
+        next_offset = f.tell()
+    return {"content": content, "size": size, "next_offset": next_offset}
