@@ -55,9 +55,10 @@
       <MarkdownViewer v-if="analysisMd" :source="analysisMd" />
     </div>
 
-    <!-- 图表（Task 14 接入 TrendChart/DcfChart，metricsSeries 已备好） -->
+    <!-- 图表 -->
     <div v-else-if="tab === 'charts'">
-      <p class="empty">图表组件将在下个任务接入</p>
+      <TrendChart v-if="metricsSeries.length" :series="metricsSeries" title="营收/净利润趋势（百万$）" />
+      <p v-else class="empty">暂无分析数据，先生成财报分析</p>
     </div>
 
     <!-- DCF -->
@@ -75,6 +76,7 @@
         </div>
         <p v-if="!dcfList.length" class="empty">暂无 DCF 报告，可点击上方"DCF 估值"发起</p>
       </div>
+      <DcfChart v-for="d in dcfList.filter(x => x.valuation)" :key="d.id" :report="d" />
       <MarkdownViewer v-if="dcfMd" :source="dcfMd" />
     </div>
   </div>
@@ -88,6 +90,8 @@ import { ref, reactive, onMounted, onUnmounted, watch } from 'vue'
 import { api } from '../api'
 import { useTaskStore } from '../stores/tasks'
 import MarkdownViewer from '../components/MarkdownViewer.vue'
+import TrendChart from '../components/TrendChart.vue'
+import DcfChart from '../components/DcfChart.vue'
 
 const props = defineProps({ ticker: String })
 const taskStore = useTaskStore()
