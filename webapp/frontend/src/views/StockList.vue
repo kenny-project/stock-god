@@ -11,6 +11,7 @@
         <td>{{ s.name_cn || s.name_en }}</td>
         <td>{{ s.market }}</td>
       </tr>
+      <tr v-if="!stocks.length"><td colspan="3" class="empty">无匹配股票</td></tr>
     </tbody>
   </table>
   <div v-if="message" class="toast" :class="messageType">{{ message }}</div>
@@ -21,11 +22,11 @@
   </div>
 </template>
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { api } from '../api'
 const q = ref(''), stocks = ref([]), total = ref(0), page = ref(1), size = 50, syncing = ref(false)
 const message = ref(''), messageType = ref('success')
-let timer, toastTimer
+let timer, toastTimer, seq = 0
 const debouncedLoad = () => { clearTimeout(timer); timer = setTimeout(() => { page.value = 1; load() }, 300) }
 function showToast(text, type = 'success') {
   message.value = text; messageType.value = type
@@ -33,8 +34,14 @@ function showToast(text, type = 'success') {
   toastTimer = setTimeout(() => { message.value = '' }, 3000)
 }
 async function load() {
-  const d = await api.stocks(q.value, page.value, size)
-  stocks.value = d.items; total.value = d.total
+  const my = ++seq
+  try {
+    const d = await api.stocks(q.value, page.value, size)
+    if (my !== seq) return
+    stocks.value = d.items; total.value = d.total
+  } catch (e) {
+    if (my === seq) showToast('加载股票列表失败', 'error')
+  }
 }
 async function sync() {
   syncing.value = true
@@ -47,6 +54,7 @@ async function sync() {
   } finally { syncing.value = false }
 }
 onMounted(load)
+onUnmounted(() => { clearTimeout(timer); clearTimeout(toastTimer) })
 </script>
 <style scoped>
 .toast {
@@ -56,4 +64,5 @@ onMounted(load)
 }
 .toast.success { background: #16a34a; }
 .toast.error { background: #dc2626; }
+.empty { color: #999; text-align: center; padding: 24px 0; }
 </style>
