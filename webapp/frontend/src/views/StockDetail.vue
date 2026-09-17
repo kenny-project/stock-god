@@ -130,6 +130,10 @@ async function loadAll() {
     detail.value = stock
     analyses.value = aList
     dcfList.value = dList
+    analysisMd.value = ''
+    dcfMd.value = ''
+    activeAnalysisId.value = null
+    activeDcfId.value = null
     buildMetricsSeries(aList)
   } catch (e) {
     if (my === seq) showToast('加载失败', 'error')
@@ -137,34 +141,44 @@ async function loadAll() {
 }
 
 async function loadAnalysis(a) {
-  activeAnalysisId.value = a.id
+  const my = ++seq
   try {
     const d = await api.analysis(props.ticker, a.id)
+    if (my !== seq) return
+    activeAnalysisId.value = a.id
     analysisMd.value = d.markdown
-  } catch { showToast('加载分析报告失败', 'error') }
+  } catch {
+    if (my === seq) showToast('加载分析报告失败', 'error')
+  }
 }
 
 async function loadDcf(d) {
-  activeDcfId.value = d.id
+  const my = ++seq
   try {
     const r = await api.dcfOne(props.ticker, d.id)
+    if (my !== seq) return
+    activeDcfId.value = d.id
     dcfMd.value = r.markdown
-  } catch { showToast('加载 DCF 报告失败', 'error') }
+  } catch {
+    if (my === seq) showToast('加载 DCF 报告失败', 'error')
+  }
 }
 
-function watchUntilDone() {
+function watchUntilDone(ticker) {
   clearInterval(pollTimer)
+  const my = ++seq
   const poll = async () => {
     try {
-      const d = await api.stock(props.ticker)
-      detail.value = d
-      if (!d.running_tasks.length) {
+      const d = await api.stock(ticker)
+      if (my === seq && d.ticker === ticker) detail.value = d
+      if (d.ticker === ticker && !d.running_tasks.length) {
         clearInterval(pollTimer)
         pollTimer = null
         loadAll()
       }
     } catch { /* 忽略瞬时网络错误，下轮重试 */ }
   }
+  poll()
   pollTimer = setInterval(poll, 3000)
 }
 
@@ -172,7 +186,7 @@ async function submit(type, params) {
   try {
     await taskStore.submit(type, props.ticker, params)
     showToast('任务已提交，可在任务中心查看进度')
-    watchUntilDone()
+    watchUntilDone(props.ticker)
   } catch (e) {
     if (e?.status === 409) showToast('已有同类型任务进行中', 'error')
     else showToast(`提交失败: ${e.message}`, 'error')
@@ -187,7 +201,11 @@ function submitDcf() {
 }
 
 onMounted(loadAll)
-watch(() => props.ticker, loadAll)
+watch(() => props.ticker, () => {
+  clearInterval(pollTimer)
+  pollTimer = null
+  loadAll()
+})
 onUnmounted(() => { clearInterval(pollTimer); clearTimeout(toastTimer) })
 </script>
 
