@@ -19,7 +19,7 @@
             <td>{{ fmt(t.created_at) }}</td>
             <td>{{ fmt(t.finished_at) }}</td>
             <td>
-              <button v-if="['pending', 'running'].includes(t.status)" class="btn" @click="cancel(t)">取消</button>
+              <button v-if="['pending', 'running'].includes(t.status)" class="btn" :disabled="cancelling.has(t.id)" @click="cancel(t)">取消</button>
               <button class="btn" @click="toggleLog(t.id)">日志</button>
             </td>
           </tr>
@@ -40,7 +40,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { api } from '../api'
 import { useTaskStore } from '../stores/tasks'
 import LogViewer from '../components/LogViewer.vue'
@@ -77,12 +77,18 @@ function toggleLog(id) {
   expandId.value = expandId.value === id ? null : id // 互斥展开
 }
 
+const cancelling = reactive(new Set()) // 取消请求 in-flight 的任务 id，防止连发重复 cancel
+
 async function cancel(t) {
+  if (cancelling.has(t.id)) return
+  cancelling.add(t.id)
   try {
     await api.cancelTask(t.id)
     showToast('已请求取消')
   } catch (e) {
     showToast(`取消失败: ${e.message}`, 'error')
+  } finally {
+    cancelling.delete(t.id)
   }
 }
 

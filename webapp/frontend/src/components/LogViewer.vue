@@ -141,8 +141,15 @@ function reset() {
 
 watch(() => props.taskId, reset)
 watch(() => props.live, (v) => {
-  if (v) startPoll()
-  else stopPoll()
+  if (v) {
+    startPoll()
+  } else {
+    // 任务结束（live true→false）：停轮询前补拉一次增量，避免完成前最后写入的日志丢失。
+    // pollAppend 内部自吞异常且与定时器无关，可直接调用；若此刻已有请求在飞，该次会跳过，
+    // 由在飞请求兜底，同样不丢数据。
+    pollAppend()
+    stopPoll()
+  }
 })
 
 onMounted(reset)
