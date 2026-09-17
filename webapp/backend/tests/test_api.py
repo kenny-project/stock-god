@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -22,10 +23,12 @@ class DummyExecutor:
 
 
 _dummy_executor: DummyExecutor | None = None  # 指向当前 fixture 装的 DummyExecutor，供测试断言
+_factory = None  # 当前 fixture 的 sessionmaker，供测试伪造 running 状态 / 读 DB 终态
 
 
 @pytest.fixture
 def client():
+    global _dummy_executor, _factory
     global _dummy_executor
     # StaticPool：内存库全局共享单连接。FastAPI 同步端点跑在线程池里，
     # sqlite:// 默认的 SingletonThreadPool 会给每个线程一个空库（no such table）
@@ -34,6 +37,7 @@ def client():
     Base.metadata.create_all(engine)
     Factory = sessionmaker(bind=engine, expire_on_commit=False)
     set_engine_for_test(engine, Factory)
+    _factory = Factory
     import api.tasks_api as tasks_api
     _dummy_executor = DummyExecutor()
     tasks_api.set_executor(_dummy_executor)
@@ -86,6 +90,43 @@ async def test_task_flow_and_cancel(client):
         assert r.json()["status"] == "cancelled"
         r = await c.post(f"/api/tasks/{tid}/cancel")
         assert r.status_code == 409
+
+
+async def test_cancel_running_task_writes_cancelled_before_kill(client):
+    """取消 running 任务：API 必须先落库 cancelled 终态再终止子进程。
+    否则子进程被 SIGTERM（exit -15）后，executor finally 读到的权威状态仍是
+    running，任务会被记为 failed 而非 cancelled。"""
+    import api.tasks_api as tasks_api
+    from models import Task
+
+    seen_at_kill = []  # executor 终止子进程时读到的 DB 状态
+
+    class RunningExecutor(DummyExecutor):
+        async def cancel(self, task):
+            with _factory() as s:
+                seen_at_kill.append(s.get(Task, task.id).status)
+            return True
+
+    tasks_api.set_executor(RunningExecutor())
+    async with client as c:
+        r = await c.post("/api/tasks", json={"task_type": "dcf", "ticker": "NKE", "params": {}})
+        tid = r.json()["id"]
+        # 伪造任务已进入 running（真实路径由 executor.run_one 置位）
+        with _factory() as s:
+            t = s.get(Task, tid)
+            t.status = "running"
+            t.started_at = datetime.now()
+            s.commit()
+        r = await c.post(f"/api/tasks/{tid}/cancel")
+        assert r.status_code == 200
+        assert r.json()["status"] == "cancelled"
+        assert r.json()["finished_at"] is not None
+    # 杀进程时 DB 已是 cancelled（写库先于终止子进程）
+    assert seen_at_kill == ["cancelled"]
+    with _factory() as s:
+        t = s.get(Task, tid)
+        assert t.status == "cancelled"  # 终态是已取消而非 failed
+        assert t.error_summary == "任务被手动取消"
 
 
 async def test_created_task_held_by_module_ref(client):

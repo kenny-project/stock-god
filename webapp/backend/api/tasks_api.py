@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -76,6 +77,13 @@ async def cancel_task(task_id: int, db: Session = Depends(get_db)):
     if task.status not in ("pending", "running"):
         raise HTTPException(409, f"任务已结束({task.status})，无法取消")
     if task.status == "running":
+        # 先落库 cancelled 终态再杀进程（spec §6）：子进程被 SIGTERM 后，executor
+        # finally 会读 DB 权威状态决定是否覆盖。若此刻仍是 running，子进程
+        # exit -15 会被记为 failed 而非 cancelled
+        task.status = "cancelled"
+        task.finished_at = datetime.now()
+        task.error_summary = "任务被手动取消"
+        db.commit()
         await get_executor().cancel(task)
     else:
         task.status = "cancelled"
