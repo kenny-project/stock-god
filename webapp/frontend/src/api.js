@@ -8,7 +8,10 @@ async function req(url, opts = {}) {
 }
 
 export const api = {
-  stocks: (q = '', page = 1, size = 50) => req(`/api/stocks?q=${encodeURIComponent(q)}&page=${page}&size=${size}`),
+  stocks: (q = '', page = 1, size = 50, favorite = false) =>
+    req(`/api/stocks?q=${encodeURIComponent(q)}&page=${page}&size=${size}${favorite ? '&favorite=true' : ''}`),
+  setFavorite: (ticker, favorite) =>
+    req(`/api/stocks/${ticker}/favorite`, { method: 'POST', body: JSON.stringify({ favorite }) }),
   stock: (t) => req(`/api/stocks/${t}`),
   analyses: (t) => req(`/api/stocks/${t}/analyses`),
   analysis: (t, id) => req(`/api/stocks/${t}/analyses/${id}`),
