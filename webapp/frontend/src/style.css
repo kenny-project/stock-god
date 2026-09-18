@@ -17,3 +17,44 @@ tr.clickable { cursor: pointer; } tr.clickable:hover { background: #f6f8fa; }
 .btn { padding: 6px 14px; border: 1px solid #d0d7de; border-radius: 6px; background: #f6f8fa; cursor: pointer; }
 .btn.primary { background: #1f883d; color: #fff; border-color: #1f883d; }
 .file-links a { font-size: 12px; margin-right: 10px; }
+
+/* ===== 三栏工作台布局 ===== */
+.app-shell { height: 100vh; display: flex; flex-direction: column; }
+nav { flex-shrink: 0; }
+nav strong { font-size: 16px; }
+
+.workbench { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+.wb-left { flex-shrink: 0; overflow: auto; padding: 0 12px; background: #fff; }
+.wb-divider {
+  flex-shrink: 0; width: 6px; cursor: col-resize; background: transparent;
+  border-left: 1px solid #eee; transition: background .15s;
+}
+.wb-divider:hover, .workbench.dragging .wb-divider { background: #0366d6; }
+body.wb-col-resizing { cursor: col-resize; user-select: none; }
+.wb-center { flex: 1; min-width: 0; overflow-y: auto; padding: 0 24px; }
+.wb-empty {
+  height: 100%; display: flex; align-items: center; justify-content: center;
+  color: #999; font-size: 15px;
+}
+
+/* 右侧任务侧栏 */
+.task-sidebar {
+  flex-shrink: 0; width: 280px; display: flex; flex-direction: column;
+  border-left: 1px solid #eee; background: #fff; overflow: hidden;
+}
+.task-sidebar-rail {
+  flex-shrink: 0; width: 36px; cursor: pointer; position: relative;
+  border-left: 1px solid #eee; background: #f6f8fa;
+  display: flex; align-items: center; justify-content: center;
+}
+.task-sidebar-rail:hover { background: #eef1f4; }
+.ts-rail-text {
+  writing-mode: vertical-rl; letter-spacing: 4px; font-size: 13px; color: #555;
+}
+.ts-dot {
+  position: absolute; top: 10px; right: 10px;
+  width: 8px; height: 8px; border-radius: 50%; background: #d73a49;
+}
+
+/* /tasks 全页 */
+.tasks-page { flex: 1; min-height: 0; overflow-y: auto; padding: 0 24px; }

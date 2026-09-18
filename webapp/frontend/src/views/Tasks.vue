@@ -1,5 +1,5 @@
 <template>
-  <div>
+  <div class="tasks-page">
     <h2 style="margin:8px 0">任务中心</h2>
     <table>
       <thead>

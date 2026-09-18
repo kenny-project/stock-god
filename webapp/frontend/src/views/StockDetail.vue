@@ -115,10 +115,9 @@ const props = defineProps({ ticker: String })
 const router = useRouter()
 const taskStore = useTaskStore()
 
-// 返回上一页；无历史（如直接输 URL 进入）时回列表页
+// 回到工作台空态（左列表 + 中栏空态）
 function goBack() {
-  if (window.history.length > 1) router.back()
-  else router.push('/')
+  router.push('/')
 }
 
 const detail = ref(null), analyses = ref([]), dcfList = ref([])
