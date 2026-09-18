@@ -12,6 +12,8 @@ export const api = {
     req(`/api/stocks?q=${encodeURIComponent(q)}&page=${page}&size=${size}${favorite ? '&favorite=true' : ''}`),
   setFavorite: (ticker, favorite) =>
     req(`/api/stocks/${ticker}/favorite`, { method: 'POST', body: JSON.stringify({ favorite }) }),
+  setAliases: (ticker, aliases) =>
+    req(`/api/stocks/${ticker}/aliases`, { method: 'POST', body: JSON.stringify({ aliases }) }),
   stock: (t) => req(`/api/stocks/${t}`),
   analyses: (t) => req(`/api/stocks/${t}/analyses`),
   analysis: (t, id) => req(`/api/stocks/${t}/analyses/${id}`),

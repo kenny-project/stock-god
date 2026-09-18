@@ -4,7 +4,7 @@
       <button class="tab" :class="{ active: view === 'all' }" @click="switchView('all')">全部</button>
       <button class="tab" :class="{ active: view === 'fav' }" @click="switchView('fav')">收藏</button>
     </div>
-    <input v-model="q" placeholder="搜索代码/公司名" style="flex:1; padding:8px 12px" @input="debouncedLoad" />
+    <input v-model="q" placeholder="搜索代码/公司名/别名（支持中文）" style="flex:1; padding:8px 12px" @input="debouncedLoad" />
     <button class="btn" @click="sync" :disabled="syncing">同步股票列表</button>
   </div>
   <table>

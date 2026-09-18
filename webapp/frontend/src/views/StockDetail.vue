@@ -1,6 +1,19 @@
 <template>
   <div v-if="detail">
-    <h2 style="margin:8px 0">{{ detail.ticker }} — {{ detail.name_cn || detail.name_en }}</h2>
+    <h2 style="margin:8px 0">
+      {{ detail.ticker }} — {{ detail.name_cn || detail.name_en }}
+      <button class="alias-btn" title="编辑搜索别名" @click="openAliasEdit">✎ 别名</button>
+      <span v-if="detail.aliases && detail.aliases.length" class="alias-list">
+        （别名：{{ detail.aliases.join(' / ') }}）
+      </span>
+    </h2>
+
+    <div v-if="aliasEditing" class="alias-panel">
+      <input v-model="aliasInput" placeholder="多个别名用逗号分隔，如：google, 谷歌"
+             style="flex:1; min-width:220px" @keyup.enter="saveAliases" />
+      <button class="btn primary" @click="saveAliases">保存</button>
+      <button class="btn" @click="aliasEditing = false">取消</button>
+    </div>
 
     <div class="actions">
       <button class="btn" @click="submit('download', { years: 5 })">下载财报</button>
@@ -99,6 +112,7 @@ const taskStore = useTaskStore()
 const detail = ref(null), analyses = ref([]), dcfList = ref([])
 const metricsSeries = ref([]) // Task 14 图表数据：[{ name:'营收', years:[...], values:[...] }, ...]
 const tab = ref('filings'), showDcf = ref(false)
+const aliasEditing = ref(false), aliasInput = ref('')
 const analysisMd = ref(''), dcfMd = ref('')
 const activeAnalysisId = ref(null), activeDcfId = ref(null)
 const dcfForm = reactive({ growth: '', discount: '', years: '', safety: '' })
@@ -188,6 +202,24 @@ function watchUntilDone(ticker) {
   pollTimer = setInterval(poll, 3000)
 }
 
+function openAliasEdit() {
+  aliasInput.value = (detail.value.aliases || []).join(', ')
+  aliasEditing.value = true
+}
+
+// 逗号（中英文）分隔 → 数组；去空白/空串由后端兜底
+async function saveAliases() {
+  const list = aliasInput.value.split(/[,，]/).map(s => s.trim()).filter(Boolean)
+  try {
+    const updated = await api.setAliases(props.ticker, list)
+    detail.value = { ...detail.value, ...updated } // StockOut 字段并入当前 detail，不打断已打开的报表
+    aliasEditing.value = false
+    showToast(list.length ? '别名已保存' : '别名已清空')
+  } catch (e) {
+    showToast(e.message || '保存别名失败', 'error')
+  }
+}
+
 async function submit(type, params) {
   try {
     await taskStore.submit(type, props.ticker, params)
@@ -216,6 +248,13 @@ onUnmounted(() => { clearInterval(pollTimer); clearTimeout(toastTimer) })
 </script>
 
 <style scoped>
+.alias-btn {
+  border: 1px solid #ddd; background: #fff; color: #666; cursor: pointer;
+  font-size: 12px; padding: 2px 8px; border-radius: 4px; vertical-align: middle;
+}
+.alias-btn:hover { color: #2563eb; border-color: #2563eb; }
+.alias-list { color: #666; font-size: 13px; font-weight: normal; }
+.alias-panel { display: flex; gap: 8px; align-items: center; padding: 8px 0 12px; }
 .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 0 12px; }
 .dcf-panel { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 12px; background: #f6f8fa; border-radius: 6px; margin-bottom: 12px; }
 .dcf-panel label { font-size: 13px; display: flex; align-items: center; gap: 6px; }
