@@ -49,7 +49,10 @@
             <td>{{ f.form_type }}</td>
             <td>{{ f.period }}</td>
             <td>{{ fmt(f.downloaded_at) }}</td>
-            <td><a :href="'/api/filings/' + f.id + '/file'" target="_blank">打开/下载</a></td>
+            <td class="file-links">
+              <a :href="'/api/filings/' + f.id + '/file'" target="_blank">打开</a>
+              <a :href="'/api/filings/' + f.id + '/file?download=1'">下载</a>
+            </td>
           </tr>
           <tr v-if="!detail.filings.length"><td colspan="4" class="empty">尚未下载财报</td></tr>
         </tbody>

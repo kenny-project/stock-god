@@ -75,7 +75,7 @@ def dcf_content(ticker: str, dcf_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/filings/{filing_id}/file")
-def filing_file(filing_id: int, db: Session = Depends(get_db)):
+def filing_file(filing_id: int, download: bool = False, db: Session = Depends(get_db)):
     f = db.get(Filing, filing_id)
     if not f:
         raise HTTPException(404, "filing not found")
@@ -83,8 +83,12 @@ def filing_file(filing_id: int, db: Session = Depends(get_db)):
     if not full.startswith(os.path.realpath(ROOT) + os.sep) or not os.path.isfile(full):
         raise HTTPException(404, f"财报文件缺失: {f.local_path}")
     ext = os.path.splitext(full)[1].lower()
+    name = os.path.basename(full)
+    # 打开（inline，浏览器按 Content-Type 预览）与下载（attachment）拆开；
+    # 文件名来自 local_path 的 basename（EDGAR 下载名，纯 ASCII），可安全放入 header
+    disposition = f'attachment; filename="{name}"' if download else "inline"
     return FileResponse(full, media_type=_MD_TYPES.get(ext, "application/octet-stream"),
-                        filename=os.path.basename(full))
+                        headers={"Content-Disposition": disposition})
 
 
 @router.get("/tasks/{task_id}/log")

@@ -73,6 +73,14 @@ async def test_filing_file_download(env):
         r = await c.get(f"/api/filings/{fid}/file")
         assert r.status_code == 200
         assert "text/html" in r.headers["content-type"]
+        # 默认 inline：浏览器按 Content-Type 预览打开
+        assert r.headers["content-disposition"] == "inline"
+        # download=1 → attachment，文件名取 local_path basename（EDGAR 下载名，纯 ASCII）
+        r2 = await c.get(f"/api/filings/{fid}/file", params={"download": True})
+        assert r2.status_code == 200
+        assert r2.headers["content-disposition"] == \
+            'attachment; filename="nke-20210831.htm"'
+        assert "text/html" in r2.headers["content-type"]
 
 
 async def test_filing_missing_404(env):

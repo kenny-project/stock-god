@@ -16,3 +16,4 @@ tr.clickable { cursor: pointer; } tr.clickable:hover { background: #f6f8fa; }
 .markdown table { margin: 12px 0; } .markdown th, .markdown td { border: 1px solid #ddd; }
 .btn { padding: 6px 14px; border: 1px solid #d0d7de; border-radius: 6px; background: #f6f8fa; cursor: pointer; }
 .btn.primary { background: #1f883d; color: #fff; border-color: #1f883d; }
+.file-links a { font-size: 12px; margin-right: 10px; }
