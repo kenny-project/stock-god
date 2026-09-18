@@ -27,7 +27,7 @@
           <div v-if="t.status === 'failed' && (t.error_code || t.error_summary)" class="ts-error">
             [{{ t.error_code }}] {{ t.error_summary }}
           </div>
-          <LogViewer :task-id="t.id" :live="isCancellable(t)" />
+          <LogViewer :task-id="t.id" />
         </div>
       </template>
       <div v-if="!visibleTasks.length" class="ts-empty">暂无任务</div>

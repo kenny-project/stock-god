@@ -32,7 +32,7 @@
               <div v-if="t.status === 'failed' && (t.error_code || t.error_summary)" class="task-error">
                 [{{ t.error_code }}] {{ t.error_summary }}
               </div>
-              <LogViewer :task-id="t.id" :live="['running', 'pending'].includes(t.status)" />
+              <LogViewer :task-id="t.id" />
             </td>
           </tr>
         </template>
