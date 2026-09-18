@@ -63,8 +63,13 @@ class TaskExecutor:
                     # 同步股票列表不走子进程，直接在线程池拉 EDGAR
                     from services.edgar import fetch_company_tickers, upsert_stocks
                     loop = asyncio.get_running_loop()
-                    data = await loop.run_in_executor(None, fetch_company_tickers)
-                    n = upsert_stocks(session, data)
+                    try:
+                        data = await loop.run_in_executor(None, fetch_company_tickers)
+                        n = upsert_stocks(session, data)
+                    except Exception:
+                        # 回滚会话里的半状态（部分 add/脏字段），避免随 finally 的 commit 落库
+                        session.rollback()
+                        raise
                     with open(log_path, "ab") as log_fh:
                         log_fh.write(f"synced {n} companies\n".encode("utf-8"))
                         # 指数成分标记是附加目标：失败只记日志警告行，不影响任务成功
@@ -82,7 +87,11 @@ class TaskExecutor:
                                 f"(名单未匹配 {len(report['ndx100_unmatched'])})\n"
                                 .encode("utf-8"))
                         except Exception as e:
-                            log_fh.write(f"指数成分同步失败（不影响股票列表）: {e}\n".encode("utf-8"))
+                            # 丢弃指数标记的半状态（全量置 False 后只置了一部分），
+                            # 防止随成功 commit 连带落库；异常类型一并记入便于定位
+                            session.rollback()
+                            log_fh.write(f"指数成分同步失败（不影响股票列表）: "
+                                         f"{type(e).__name__}: {e}\n".encode("utf-8"))
                     task.status = "success"
                     return
                 with open(log_path, "ab") as log_fh:

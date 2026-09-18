@@ -77,11 +77,15 @@ async function load(append) {
     stocks.value = append ? stocks.value.concat(d.items) : d.items
     total.value = d.total
     await nextTick()
-    fillIfVisible() // 首屏/过滤后条数太少没填满容器时，继续自动补页
   } catch (e) {
     if (my === seq) showToast('加载股票列表失败', 'error')
   } finally {
-    if (my === seq) loading.value = false
+    if (my === seq) {
+      loading.value = false
+      // 首屏/过滤后条数太少没填满容器时，继续自动补页。
+      // 必须在 loading 释放后调用：loadMore 首行守卫遇 loading=true 直接 return
+      fillIfVisible()
+    }
   }
 }
 function loadMore() {
