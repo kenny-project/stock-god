@@ -1,7 +1,6 @@
 <template>
   <div v-if="detail">
     <h2 style="margin:8px 0">
-      <button class="btn" title="返回列表" @click="goBack">← 返回</button>
       {{ detail.ticker }} — {{ detail.name_cn || detail.name_en }}
       <button class="alias-btn" title="编辑搜索别名" @click="openAliasEdit">✎ 别名</button>
       <span v-if="detail.aliases && detail.aliases.length" class="alias-list">
@@ -104,7 +103,6 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
-import { useRouter } from 'vue-router'
 import { api } from '../api'
 import { useTaskStore } from '../stores/tasks'
 import MarkdownViewer from '../components/MarkdownViewer.vue'
@@ -112,13 +110,7 @@ import TrendChart from '../components/TrendChart.vue'
 import DcfChart from '../components/DcfChart.vue'
 
 const props = defineProps({ ticker: String })
-const router = useRouter()
 const taskStore = useTaskStore()
-
-// 回到工作台空态（左列表 + 中栏空态）
-function goBack() {
-  router.push('/')
-}
 
 const detail = ref(null), analyses = ref([]), dcfList = ref([])
 const metricsSeries = ref([]) // Task 14 图表数据：[{ name:'营收', years:[...], values:[...] }, ...]
