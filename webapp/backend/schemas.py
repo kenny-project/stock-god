@@ -71,6 +71,9 @@ class TaskOut(BaseModel):
     error_summary: str | None
     log_path: str | None
     params: dict | None
+    # 下载任务实时进度（仅 download 任务有值，解析失败为 NULL，前端据此隐藏）
+    progress_done: int | None = None
+    progress_total: int | None = None
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None

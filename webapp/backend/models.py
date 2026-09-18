@@ -80,6 +80,10 @@ class Task(Base):
     error_code: Mapped[str | None] = mapped_column(String(64), default=None)
     error_summary: Mapped[str | None] = mapped_column(Text, default=None)
     log_path: Mapped[str | None] = mapped_column(String(512), default=None)
+    # 下载任务实时进度（仅 task_type=download）：done=已完成(下载+跳过已存在)，total=各财年报文总数
+    # 解析失败/非下载任务为 NULL，前端据此隐藏
+    progress_done: Mapped[int | None] = mapped_column(Integer, default=None)
+    progress_total: Mapped[int | None] = mapped_column(Integer, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)

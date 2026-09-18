@@ -1,5 +1,6 @@
 """后台任务执行器：semaphore 并发限制、状态机流转、日志落盘、进程组取消。"""
 import asyncio
+import contextlib
 import os
 import signal
 from datetime import datetime
@@ -7,10 +8,12 @@ from sqlalchemy import select
 import services.register as register
 from db import ROOT
 from models import Task
+from services.progress import DownloadProgressTracker, parse_download_progress
 from services.runners import build_command, classify_error
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "logs", "tasks")
 MAX_CONCURRENCY = 2
+PROGRESS_POLL_INTERVAL = 2.0  # 下载任务进度监控轮询间隔（秒）
 
 # 存函数名而非函数引用：调用时经 getattr 取，便于测试 monkeypatch 生效
 _REGISTER = {"download": "register_download",
@@ -99,11 +102,19 @@ class TaskExecutor:
                                                           task.stock.symbol() if task.stock else "",
                                                           task.params or {}), log_fh)
                     self._procs[task.id] = proc
+                    # 下载任务启动实时进度监控（其他类型日志无可解析的进度，不启用）
+                    monitor = asyncio.create_task(self._monitor_download_progress(task.id, log_path)) \
+                        if task.task_type == "download" else None
                     try:
                         out, err = await proc.communicate()
                         log_fh.write(err)
                     finally:
                         self._procs.pop(task.id, None)
+                        if monitor:
+                            # 先停监控再收尾，避免监控协程晚于终态解析写库
+                            monitor.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await monitor
                 if proc.returncode == 0:
                     registered = getattr(register, _REGISTER[task.task_type])(session, task.stock) \
                         if task.stock else 0
@@ -133,6 +144,10 @@ class TaskExecutor:
                 task.error_summary = f"执行器内部错误: {e}"
             finally:
                 task.finished_at = datetime.now()
+                # 终态兜底：无论成功/失败/取消，都按日志全文做最后一次解析，
+                # 保证 progress 终值准确（覆盖增量监控可能的截断误差）
+                if task.task_type == "download":
+                    self._finalize_download_progress(task.id, log_path)
                 # 取消竞态：API 层可能已把 DB 状态置为 cancelled。必须用全新会话
                 # 读权威状态——本会话里 dirty 的 failed/success 尚未落库，若经本会话
                 # 读取（含 autoflush）只会看到自己的脏值，无法发现取消标记
@@ -152,6 +167,65 @@ class TaskExecutor:
             *cmd, stdout=log_fh, stderr=asyncio.subprocess.PIPE,
             cwd=ROOT,
             start_new_session=True)
+
+    # ---------- 下载进度监控 ----------
+
+    def _poll_progress_once(self, task_id: int, log_path: str, tracker: DownloadProgressTracker,
+                            offset: int) -> int:
+        """读日志从 offset 起的新增段，累计解析并独立会话写库；返回新 offset。
+
+        供监控协程循环调用，也可单独测试。日志读写异常（文件暂不存在等）不抛出。
+        """
+        try:
+            with open(log_path, "rb") as fh:
+                fh.seek(offset)
+                data = fh.read()
+        except OSError:
+            return offset
+        if not data:
+            return offset
+        tracker.feed(data.decode("utf-8", "replace"))
+        self._save_progress(task_id, tracker.done, tracker.total)
+        return offset + len(data)
+
+    def _save_progress(self, task_id: int, done: int, total: int) -> None:
+        """独立会话写进度；失败仅记日志，绝不影响任务本身。"""
+        try:
+            with self._factory() as s:
+                row = s.get(Task, task_id)
+                if row is None:
+                    return
+                row.progress_done = done
+                row.progress_total = total
+                s.commit()
+        except Exception as e:
+            print(f"[executor] 任务 {task_id} 进度写库失败: {type(e).__name__}: {e}")
+
+    def _finalize_download_progress(self, task_id: int, log_path: str) -> None:
+        """任务收尾时按日志全文解析一次，落最终进度。"""
+        try:
+            with open(log_path, "rb") as fh:
+                done, total = parse_download_progress(fh.read().decode("utf-8", "replace"))
+            self._save_progress(task_id, done, total)
+        except OSError as e:
+            print(f"[executor] 任务 {task_id} 终态进度解析失败: {e}")
+
+    async def _monitor_download_progress(self, task_id: int, log_path: str) -> None:
+        """进程运行期间每 PROGRESS_POLL_INTERVAL 秒读一次日志新增段，增量累计进度写库。
+
+        仅 task_type=download 启用；子进程退出后由调用方 cancel。任何轮询内异常
+        都只记日志不中断（下一次循环重试），保证监控本身不拖垮任务。
+        """
+        tracker = DownloadProgressTracker()
+        offset = 0
+        try:
+            while True:
+                await asyncio.sleep(PROGRESS_POLL_INTERVAL)
+                offset = self._poll_progress_once(task_id, log_path, tracker, offset)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # 防御：监控循环意外崩溃不应影响任务执行
+            print(f"[executor] 任务 {task_id} 进度监控异常退出: {type(e).__name__}: {e}")
 
     async def cancel(self, task) -> bool:
         proc = self._procs.get(task.id)

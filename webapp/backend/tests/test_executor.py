@@ -1,3 +1,4 @@
+import asyncio
 import os
 import pytest
 from sqlalchemy import create_engine, select
@@ -234,3 +235,105 @@ async def test_cancel_race_respected_in_finally(session_factory, tmp_path, monke
         s.refresh(task)
         assert task.status == "cancelled"
         assert task.finished_at is not None
+
+
+class StreamingDownloadProc:
+    """communicate 期间分步向日志文件追加下载日志，模拟子进程边跑边写 stdout。"""
+
+    def __init__(self, log_path, factory, task_id, observed, code=0, step_interval=0.15):
+        self.returncode = code
+        self._log_path = log_path
+        self._factory = factory
+        self._task_id = task_id
+        self._observed = observed
+        self._interval = step_interval
+        self._step1 = "--- FY2021: 找到 4 份财报 ---\n    ✅ 下载完成\n    ✅ 下载完成\n"
+        self._step2 = "    ✅ 下载完成\n    ✅ 下载完成\n=== 完成: 下载 4 份, 跳过 0 份 ===\n"
+
+    def _append(self, text):
+        with open(self._log_path, "ab") as fh:
+            fh.write(text.encode("utf-8"))
+
+    async def communicate(self):
+        self._append(self._step1)
+        await asyncio.sleep(self._interval)
+        # 中途快照：监控协程此时应已把 (2, 4) 增量写入 DB
+        with self._factory() as s:
+            row = s.get(Task, self._task_id)
+            self._observed.append((row.progress_done, row.progress_total))
+        self._append(self._step2)
+        await asyncio.sleep(self._interval)
+        return b"", b""
+
+
+def _download_factory():
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                           poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    Factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with Factory() as s:
+        stock = Stock(ticker="AMD", market="US")
+        s.add(stock)
+        s.add(Task(task_type="download", status="pending", params={}, stock=stock))
+        s.commit()
+    return Factory
+
+
+async def test_download_progress_monitored(tmp_path, monkeypatch):
+    """下载任务运行中由监控协程增量写 progress_done/total；结束后按日志全文终态解析，值精确。"""
+    import executor as executor_mod
+    Factory = _download_factory()
+    monkeypatch.setattr(executor_mod, "PROGRESS_POLL_INTERVAL", 0.05)
+    monkeypatch.setattr(executor_mod.register, "register_download", lambda *a, **k: 1)
+    ex = TaskExecutor(Factory, log_dir=str(tmp_path))
+    observed = []
+    async def fake_exec(cmd, log_fh):
+        with Factory() as s:
+            task_id = s.scalar(select(Task)).id
+        return StreamingDownloadProc(log_fh.name, Factory, task_id, observed)
+    monkeypatch.setattr(ex, "_exec", fake_exec)
+    with Factory() as s:
+        task = s.scalar(select(Task))
+        await ex.run_one(task)
+        s.refresh(task)
+        assert task.status == "success"
+        # 终态以全文解析为准（4 完成/4 总数），不被增量累计的截断误差影响
+        assert (task.progress_done, task.progress_total) == (4, 4)
+    assert observed and observed[-1] == (2, 4)  # 运行中监控已写库
+
+
+async def test_download_progress_finalized_on_failure(tmp_path, monkeypatch):
+    """下载失败（退出码非 0）也要在收尾时按日志落终态进度。"""
+    import executor as executor_mod
+    Factory = _download_factory()
+    monkeypatch.setattr(executor_mod, "PROGRESS_POLL_INTERVAL", 0.05)
+    ex = TaskExecutor(Factory, log_dir=str(tmp_path))
+    observed = []
+    async def fake_exec(cmd, log_fh):
+        with Factory() as s:
+            task_id = s.scalar(select(Task)).id
+        # 退出码非 0，但日志里两步都已写完（失败发生在下载全部尝试之后）
+        return StreamingDownloadProc(log_fh.name, Factory, task_id, observed, code=1)
+    monkeypatch.setattr(ex, "_exec", fake_exec)
+    with Factory() as s:
+        task = s.scalar(select(Task))
+        await ex.run_one(task)
+        s.refresh(task)
+        assert task.status == "failed"
+        assert (task.progress_done, task.progress_total) == (4, 4)
+
+
+async def test_non_download_task_progress_stays_null(session_factory, tmp_path, monkeypatch):
+    """非 download 任务不启用进度监控，progress 字段保持 NULL。"""
+    import executor as executor_mod
+    ex = TaskExecutor(session_factory, log_dir=str(tmp_path))
+    async def fake_exec(cmd, log_fh):
+        return FakeProc(0)
+    monkeypatch.setattr(ex, "_exec", fake_exec)
+    monkeypatch.setattr(executor_mod.register, "register_analysis", lambda *a, **k: 1)
+    with session_factory() as s:
+        task = s.scalar(select(Task))
+        await ex.run_one(task)
+        s.refresh(task)
+        assert task.status == "success"
+        assert task.progress_done is None and task.progress_total is None
