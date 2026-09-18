@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy import String, cast, exists, func, or_, select
 from sqlalchemy.orm import Session
 from deps import get_db
 from models import Stock, Task, Filing
@@ -27,7 +27,8 @@ def _stock_out(s: Stock, filed_count: int) -> StockOut:
 
 @router.get("", response_model=StockPage)
 def list_stocks(q: str = "", page: int = Query(1, ge=1), size: int = Query(50, ge=1, le=200),
-                favorite: bool = False, db: Session = Depends(get_db)):
+                favorite: bool = False, index: str = "", has_filings: bool = False,
+                db: Session = Depends(get_db)):
     stmt = select(Stock)
     if q:
         like = f"%{q}%"
@@ -36,6 +37,13 @@ def list_stocks(q: str = "", page: int = Query(1, ge=1), size: int = Query(50, g
                               Stock.name_cn.ilike(like), cast(Stock.aliases, String).ilike(like)))
     if favorite:
         stmt = stmt.where(Stock.is_favorite.is_(True))
+    # index 取值 sp500/ndx100，空或未知值不过滤
+    if index in ("sp500", "ndx100"):
+        col = Stock.in_sp500 if index == "sp500" else Stock.in_ndx100
+        stmt = stmt.where(col.is_(True))
+    if has_filings:
+        # EXISTS 子查询：只要有一条 Filing 记录即算"已下载"
+        stmt = stmt.where(exists().where(Filing.stock_id == Stock.id))
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
     items = db.scalars(stmt.order_by(Stock.ticker).offset((page - 1) * size).limit(size)).all()
     counts = _filed_counts(db, [s.id for s in items])

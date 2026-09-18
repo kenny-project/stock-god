@@ -44,3 +44,13 @@ def test_unique_ticker(session):
     s.add(Stock(ticker="NKE"))
     with pytest.raises(IntegrityError):
         s.commit()
+
+
+def test_index_flags_default_false(session):
+    """in_sp500/in_ndx100 缺省 False（ORM default 与 server_default 双保险）。"""
+    s = session
+    s.add(Stock(ticker="NKE"))
+    s.commit()
+    got = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+    assert got.in_sp500 is False
+    assert got.in_ndx100 is False

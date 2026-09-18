@@ -62,10 +62,27 @@ class TaskExecutor:
                 if task.task_type == "sync_stocks":
                     # 同步股票列表不走子进程，直接在线程池拉 EDGAR
                     from services.edgar import fetch_company_tickers, upsert_stocks
-                    data = await asyncio.get_running_loop().run_in_executor(None, fetch_company_tickers)
+                    loop = asyncio.get_running_loop()
+                    data = await loop.run_in_executor(None, fetch_company_tickers)
                     n = upsert_stocks(session, data)
                     with open(log_path, "ab") as log_fh:
                         log_fh.write(f"synced {n} companies\n".encode("utf-8"))
+                        # 指数成分标记是附加目标：失败只记日志警告行，不影响任务成功
+                        try:
+                            from services.indices import (fetch_ndx100_symbols,
+                                                          fetch_sp500_symbols,
+                                                          sync_stock_indexes)
+                            sp = await loop.run_in_executor(None, fetch_sp500_symbols)
+                            ndx = await loop.run_in_executor(None, fetch_ndx100_symbols)
+                            report = sync_stock_indexes(session, sp_symbols=sp, ndx_symbols=ndx)
+                            log_fh.write(
+                                f"指数标记: 标普500 {report['sp500']} 只"
+                                f"(名单未匹配 {len(report['sp500_unmatched'])}), "
+                                f"纳斯达克100 {report['ndx100']} 只"
+                                f"(名单未匹配 {len(report['ndx100_unmatched'])})\n"
+                                .encode("utf-8"))
+                        except Exception as e:
+                            log_fh.write(f"指数成分同步失败（不影响股票列表）: {e}\n".encode("utf-8"))
                     task.status = "success"
                     return
                 with open(log_path, "ab") as log_fh:

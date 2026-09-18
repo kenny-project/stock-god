@@ -156,6 +156,34 @@ async def test_created_task_held_by_module_ref(client):
         tasks_api.set_executor(DummyExecutor())
 
 
+async def test_index_and_has_filings_filters(client):
+    """index(sp500/ndx100) 与 has_filings 过滤，且与 q/favorite 组合正确。"""
+    from models import Filing, Stock
+    from sqlalchemy import select
+    async with client as c:
+        with _factory() as s:
+            nke = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+            nke.in_sp500 = True
+            s.add(Stock(ticker="AAPL", name_en="Apple", market="US", in_ndx100=True))
+            s.add(Filing(stock_id=nke.id, form_type="10-K", local_path="/tmp/a.htm"))
+            s.commit()
+        async def tickers(**params):
+            r = await c.get("/api/stocks", params=params)
+            assert r.status_code == 200
+            return [i["ticker"] for i in r.json()["items"]]
+        assert await tickers(index="sp500") == ["NKE"]
+        assert await tickers(index="ndx100") == ["AAPL"]
+        assert await tickers(has_filings="true") == ["NKE"]
+        # 组合：指数 + 已下载 + 搜索
+        assert await tickers(index="sp500", has_filings="true") == ["NKE"]
+        assert await tickers(index="sp500", q="NKE") == ["NKE"]
+        assert await tickers(index="sp500", q="AAPL") == []
+        assert await tickers(index="sp500", favorite="true") == []
+        # 空/未知 index 不过滤
+        assert len(await tickers(index="")) == 2
+        assert len(await tickers(index="foo")) == 2
+
+
 def test_get_executor_uninitialized_raises():
     import api.tasks_api as tasks_api
     saved = tasks_api._executor

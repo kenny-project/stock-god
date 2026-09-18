@@ -15,6 +15,9 @@ class Stock(Base):
     exchange: Mapped[str | None] = mapped_column(String(32), default=None)
     # 收藏标记：server_default 保证 SQLite 既有表 ALTER ADD COLUMN 后旧行有值
     is_favorite: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    # 指数成分标记（同步任务按名单刷新；同样用 server_default 兜底旧行）
+    in_sp500: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    in_ndx100: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     # 搜索别名（如 GOOGL → ["google", "谷歌"]）；engine 层 json_serializer 保证中文不转义
     aliases: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
 
