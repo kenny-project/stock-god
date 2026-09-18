@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class StockOut(BaseModel):
@@ -11,11 +11,21 @@ class StockOut(BaseModel):
     market: str
     exchange: str | None
     is_favorite: bool = False
+    aliases: list[str] = []  # 搜索别名（中文/简称）
     filed_count: int = 0  # 已下载财报数量（列表/详情由查询填充）
+
+    @field_validator("aliases", mode="before")
+    @classmethod
+    def _none_to_empty(cls, v):
+        return v or []  # 旧行/异常路径下 aliases 为 NULL 时按空列表处理
 
 
 class FavoriteUpdate(BaseModel):
     favorite: bool
+
+
+class AliasUpdate(BaseModel):
+    aliases: list[str]  # 覆盖式保存；去空白/去重/丢空串由端点处理
 
 
 class StockPage(BaseModel):

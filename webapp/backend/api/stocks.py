@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, or_, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.orm import Session
 from deps import get_db
 from models import Stock, Task, Filing
-from schemas import StockPage, StockOut, StockDetail, TaskOut, FavoriteUpdate
+from schemas import StockPage, StockOut, StockDetail, TaskOut, FavoriteUpdate, AliasUpdate
 
 router = APIRouter(prefix="/api/stocks", tags=["stocks"])
 
@@ -31,7 +31,9 @@ def list_stocks(q: str = "", page: int = Query(1, ge=1), size: int = Query(50, g
     stmt = select(Stock)
     if q:
         like = f"%{q}%"
-        stmt = stmt.where(or_(Stock.ticker.ilike(like), Stock.name_en.ilike(like), Stock.name_cn.ilike(like)))
+        # aliases 是 JSON 数组：cast 成文本后 LIKE 即可命中任一别名（SQLite 下足够可靠）
+        stmt = stmt.where(or_(Stock.ticker.ilike(like), Stock.name_en.ilike(like),
+                              Stock.name_cn.ilike(like), cast(Stock.aliases, String).ilike(like)))
     if favorite:
         stmt = stmt.where(Stock.is_favorite.is_(True))
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
@@ -47,6 +49,18 @@ def set_favorite(ticker: str, body: FavoriteUpdate, db: Session = Depends(get_db
     if not st:
         raise HTTPException(404, f"unknown ticker {ticker}")
     st.is_favorite = body.favorite
+    db.commit()
+    filed_count = db.scalar(select(func.count(Filing.id)).where(Filing.stock_id == st.id)) or 0
+    return _stock_out(st, filed_count)
+
+
+@router.post("/{ticker}/aliases", response_model=StockOut)
+def set_aliases(ticker: str, body: AliasUpdate, db: Session = Depends(get_db)):
+    """覆盖式保存搜索别名；去空白、去重、丢空串。"""
+    st = db.scalar(select(Stock).where(Stock.ticker == ticker.upper()))
+    if not st:
+        raise HTTPException(404, f"unknown ticker {ticker}")
+    st.aliases = list(dict.fromkeys(a.strip() for a in body.aliases if a.strip()))
     db.commit()
     filed_count = db.scalar(select(func.count(Filing.id)).where(Filing.stock_id == st.id)) or 0
     return _stock_out(st, filed_count)

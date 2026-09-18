@@ -6,7 +6,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-from db import Base
+from db import Base, json_dumps
 import models  # noqa
 from main import app, set_engine_for_test
 
@@ -32,8 +32,9 @@ def client():
     global _dummy_executor
     # StaticPool：内存库全局共享单连接。FastAPI 同步端点跑在线程池里，
     # sqlite:// 默认的 SingletonThreadPool 会给每个线程一个空库（no such table）
+    # json_serializer 与 db.make_engine 一致：中文不转义，JSON 文本列可 ilike
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
-                           poolclass=StaticPool)
+                           poolclass=StaticPool, json_serializer=json_dumps)
     Base.metadata.create_all(engine)
     Factory = sessionmaker(bind=engine, expire_on_commit=False)
     set_engine_for_test(engine, Factory)
@@ -210,6 +211,55 @@ async def test_favorite_filter_and_toggle(client):
         assert r.json()["is_favorite"] is False
         r = await c.get("/api/stocks", params={"favorite": True})
         assert r.json()["total"] == 0
+
+
+async def test_search_cn_en_name(client):
+    """中英文公司名都能命中：搜中文"苹果"与英文 "apple" 都返回 AAPL。"""
+    from models import Stock
+    async with client as c:
+        with _factory() as s:
+            s.add(Stock(ticker="AAPL", name_cn="苹果", name_en="Apple Inc.", market="US"))
+            s.commit()
+        for q in ("苹果", "apple"):
+            r = await c.get("/api/stocks", params={"q": q})
+            assert r.status_code == 200
+            assert r.json()["total"] == 1, f"q={q} 应命中 AAPL"
+            assert r.json()["items"][0]["ticker"] == "AAPL"
+        #  ticker 前缀仍可搜
+        r = await c.get("/api/stocks", params={"q": "AAPL"})
+        assert r.json()["total"] == 1
+
+
+async def test_alias_save_and_search(client):
+    """别名覆盖式保存（去空白/去重/丢空串）；搜别名命中 ticker；详情含 aliases。"""
+    from models import Stock
+    async with client as c:
+        with _factory() as s:
+            # 名称不含 "google"，命中只能靠别名
+            s.add(Stock(ticker="GOOGL", name_en="Alphabet Inc.", market="US"))
+            s.commit()
+        r = await c.post("/api/stocks/GOOGL/aliases",
+                         json={"aliases": [" google ", "谷歌", "google", "", "  "]})
+        assert r.status_code == 200
+        assert r.json()["aliases"] == ["google", "谷歌"]
+        assert r.json()["ticker"] == "GOOGL"
+        for q in ("google", "谷歌"):
+            r = await c.get("/api/stocks", params={"q": q})
+            assert r.json()["total"] == 1, f"q={q} 应靠别名命中 GOOGL"
+            assert r.json()["items"][0]["ticker"] == "GOOGL"
+        r = await c.get("/api/stocks/GOOGL")
+        assert r.json()["aliases"] == ["google", "谷歌"]
+        # 覆盖式：再保存一次替换旧别名
+        r = await c.post("/api/stocks/GOOGL/aliases", json={"aliases": ["Alphabet"]})
+        assert r.json()["aliases"] == ["Alphabet"]
+        r = await c.get("/api/stocks", params={"q": "google"})
+        assert r.json()["total"] == 0
+
+
+async def test_alias_save_404(client):
+    async with client as c:
+        r = await c.post("/api/stocks/XXXX/aliases", json={"aliases": ["google"]})
+        assert r.status_code == 404
 
 
 async def test_filed_count(client):
