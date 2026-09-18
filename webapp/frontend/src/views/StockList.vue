@@ -17,7 +17,7 @@
     <tbody>
       <tr v-for="s in stocks" :key="s.ticker" class="clickable" @click="$router.push(`/stocks/${s.ticker}`)">
         <td><strong>{{ s.ticker }}</strong></td>
-        <td>{{ s.name_cn || s.name_en }}</td>
+        <td>{{ s.aliases?.[0] || s.name_cn || s.name_en }}</td>
         <td>
           <span v-if="s.filed_count > 0">{{ s.filed_count }}</span>
           <span v-else class="muted">未下载</span>
