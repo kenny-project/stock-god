@@ -8,6 +8,10 @@
       <template v-for="t in visibleTasks" :key="t.id">
         <div class="ts-row" :class="{ open: expandId === t.id }" @click="toggleLog(t.id)">
           <span class="ts-title">#{{ t.id }} {{ typeLabel(t.task_type) }} {{ tickerOf(t) }}</span>
+          <span
+            v-if="t.task_type === 'download' && t.progress_total > 0"
+            class="ts-progress"
+          >{{ t.progress_done || 0 }}/{{ t.progress_total }}</span>
           <span class="status" :class="t.status">
             {{ statusLabel(t.status) }}<template v-if="t.status === 'failed' && t.error_code"> [{{ t.error_code }}]</template>
           </span>
@@ -127,6 +131,7 @@ onUnmounted(() => clearTimeout(toastTimer))
 .ts-row:hover { background: #f6f8fa; }
 .ts-row.open { background: #f6f8fa; }
 .ts-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ts-progress { flex-shrink: 0; font-size: 12px; color: #57606a; font-variant-numeric: tabular-nums; }
 .ts-cancel { flex-shrink: 0; padding: 2px 8px; font-size: 12px; }
 .ts-log { padding: 0 12px 8px; background: #fafbfc; border-bottom: 1px solid #f0f0f0; }
 .ts-error {

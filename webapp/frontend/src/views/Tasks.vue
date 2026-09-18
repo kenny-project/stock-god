@@ -12,6 +12,10 @@
             <td>{{ typeLabel(t.task_type) }}</td>
             <td>{{ t.stock ? t.stock.ticker : '-' }}</td>
             <td>
+              <span
+                v-if="t.task_type === 'download' && t.progress_total > 0"
+                class="task-progress"
+              >{{ t.progress_done || 0 }}/{{ t.progress_total }}</span>
               <span class="status" :class="t.status">
                 {{ statusLabel(t.status) }}<template v-if="t.status === 'failed' && t.error_code"> [{{ t.error_code }}]</template>
               </span>
@@ -108,6 +112,7 @@ onUnmounted(() => clearTimeout(toastTimer))
   font-size: 13px;
 }
 .empty { color: #999; text-align: center; padding: 24px 0; }
+.task-progress { margin-right: 6px; font-size: 12px; color: #57606a; font-variant-numeric: tabular-nums; }
 .toast {
   position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
   z-index: 1000; padding: 10px 20px; border-radius: 6px;
