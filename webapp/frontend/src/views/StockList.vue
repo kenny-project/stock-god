@@ -21,9 +21,9 @@
         <td @click.stop>
           <button class="star" :class="{ on: s.is_favorite }" :title="s.is_favorite ? '取消收藏' : '收藏'"
                   @click="toggleFav(s)">{{ s.is_favorite ? '★' : '☆' }}</button>
-          <button class="btn sm" @click="runTask('download', s)">下载</button>
-          <button class="btn sm" @click="runTask('analysis', s)">分析</button>
-          <button class="btn sm" @click="runTask('dcf', s)">DCF</button>
+          <button class="btn sm" :disabled="submitting.has(`${s.ticker}:download`)" @click="runTask('download', s)">下载</button>
+          <button class="btn sm" :disabled="submitting.has(`${s.ticker}:analysis`)" @click="runTask('analysis', s)">分析</button>
+          <button class="btn sm" :disabled="submitting.has(`${s.ticker}:dcf`)" @click="runTask('dcf', s)">DCF</button>
         </td>
       </tr>
       <tr v-if="!stocks.length">
@@ -44,6 +44,7 @@ import { api } from '../api'
 const q = ref(''), stocks = ref([]), total = ref(0), page = ref(1), size = 50, syncing = ref(false)
 const view = ref('all') // 'all' | 'fav'
 const message = ref(''), messageType = ref('success')
+const submitting = ref(new Set()) // 记录提交中的 "ticker:type"，防止行内按钮连点
 let timer, toastTimer, seq = 0
 const TASK_LABEL = { download: '下载', analysis: '分析', dcf: 'DCF' }
 const TASK_PARAMS = { download: { years: 5 }, analysis: {}, dcf: {} }
@@ -75,6 +76,11 @@ async function toggleFav(s) {
       // 收藏视图里取消收藏：移除该行
       stocks.value = stocks.value.filter(x => x.ticker !== s.ticker)
       total.value--
+      if (!stocks.value.length && page.value > 1) {
+        // 当前页删空且非第一页：回退一页重新加载，避免页码越界
+        page.value--
+        load()
+      }
     } else {
       Object.assign(s, updated)
     }
@@ -83,12 +89,17 @@ async function toggleFav(s) {
   }
 }
 async function runTask(type, s) {
+  const key = `${s.ticker}:${type}`
+  if (submitting.value.has(key)) return
+  submitting.value.add(key)
   try {
     await api.createTask(type, s.ticker, TASK_PARAMS[type])
     showToast(`${TASK_LABEL[type]}任务已提交，请到任务中心查看进度`)
   } catch (e) {
     if (e?.status === 409) showToast('已有同类型任务进行中', 'error')
     else showToast(e.message || '任务提交失败', 'error')
+  } finally {
+    submitting.value.delete(key)
   }
 }
 async function sync() {
