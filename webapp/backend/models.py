@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, Integer, Float, ForeignKey, JSON, DateTime, UniqueConstraint, Text
+from sqlalchemy import String, Integer, Float, ForeignKey, JSON, DateTime, UniqueConstraint, Text, Boolean, false
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from db import Base
 
@@ -13,6 +13,8 @@ class Stock(Base):
     cik: Mapped[int | None] = mapped_column(Integer, default=None)
     market: Mapped[str] = mapped_column(String(8), default="US")
     exchange: Mapped[str | None] = mapped_column(String(32), default=None)
+    # 收藏标记：server_default 保证 SQLite 既有表 ALTER ADD COLUMN 后旧行有值
+    is_favorite: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
 
     filings: Mapped[list["Filing"]] = relationship(back_populates="stock", cascade="all,delete-orphan")
     analyses: Mapped[list["Analysis"]] = relationship(back_populates="stock", cascade="all,delete-orphan")

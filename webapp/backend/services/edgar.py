@@ -24,6 +24,7 @@ def upsert_stocks(session, data: dict) -> int:
         if st is None:
             st = Stock(ticker=ticker)
             session.add(st)
+        # 只更新 EDGAR 来源字段；name_cn（本地维护）与 is_favorite（用户数据）不得覆盖
         st.name_en = item.get("title")
         st.cik = item.get("cik_str")
         st.market = "US"

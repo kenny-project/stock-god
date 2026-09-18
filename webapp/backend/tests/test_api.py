@@ -189,3 +189,43 @@ async def test_sync_stocks_schedules_executor(client):
         assert task.task_type == "sync_stocks"
         assert task.stock_id is None
         assert task.id == task_id
+
+
+async def test_favorite_filter_and_toggle(client):
+    """收藏切换：404 未知 ticker / 成功切换 / favorite 过滤。"""
+    async with client as c:
+        r = await c.post("/api/stocks/XXXX/favorite", json={"favorite": True})
+        assert r.status_code == 404
+        r = await c.post("/api/stocks/NKE/favorite", json={"favorite": True})
+        assert r.status_code == 200
+        assert r.json()["is_favorite"] is True
+        # 默认视图可见收藏标记
+        r = await c.get("/api/stocks")
+        assert r.json()["items"][0]["is_favorite"] is True
+        # favorite=true 只返回收藏
+        r = await c.get("/api/stocks", params={"favorite": True})
+        assert r.json()["total"] == 1 and r.json()["items"][0]["ticker"] == "NKE"
+        # 取消收藏后过滤视图为空
+        r = await c.post("/api/stocks/NKE/favorite", json={"favorite": False})
+        assert r.json()["is_favorite"] is False
+        r = await c.get("/api/stocks", params={"favorite": True})
+        assert r.json()["total"] == 0
+
+
+async def test_filed_count(client):
+    """列表与详情均返回已下载财报数；无财报为 0。"""
+    from models import Filing, Stock
+    from sqlalchemy import select
+    async with client as c:
+        with _factory() as s:
+            st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+            s.add(Filing(stock_id=st.id, form_type="10-K", local_path="/tmp/a.htm"))
+            s.add(Filing(stock_id=st.id, form_type="10-Q", local_path="/tmp/b.htm"))
+            s.add(Stock(ticker="MSFT", name_en="Microsoft", market="US"))
+            s.commit()
+        r = await c.get("/api/stocks", params={"q": "NIKE"})
+        assert r.json()["items"][0]["filed_count"] == 2
+        r = await c.get("/api/stocks", params={"q": "Microsoft"})
+        assert r.json()["items"][0]["filed_count"] == 0
+        r = await c.get("/api/stocks/NKE")
+        assert r.json()["filed_count"] == 2

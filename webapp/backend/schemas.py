@@ -10,6 +10,12 @@ class StockOut(BaseModel):
     name_en: str | None
     market: str
     exchange: str | None
+    is_favorite: bool = False
+    filed_count: int = 0  # 已下载财报数量（列表/详情由查询填充）
+
+
+class FavoriteUpdate(BaseModel):
+    favorite: bool
 
 
 class StockPage(BaseModel):
