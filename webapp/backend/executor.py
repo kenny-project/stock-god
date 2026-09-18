@@ -163,10 +163,13 @@ class TaskExecutor:
                     session.close()
 
     async def _exec(self, cmd: list[str], log_fh):
+        # stdout 直写文件时 Python 子进程默认全缓冲（攒满 4-8KB 才落盘），
+        # 运行中日志文件几乎为空；PYTHONUNBUFFERED=1 强制非缓冲，日志实时可见
         return await asyncio.create_subprocess_exec(
             *cmd, stdout=log_fh, stderr=asyncio.subprocess.PIPE,
             cwd=ROOT,
-            start_new_session=True)
+            start_new_session=True,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"})
 
     # ---------- 下载进度监控 ----------
 
