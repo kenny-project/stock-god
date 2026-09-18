@@ -14,6 +14,7 @@ submissions JSON（含分页），由 filings.recent 构建 reportDate → form 
 - 映射不到的 filing 保持 UNKNOWN 并在结果中列出，绝不臆造（数据不可造假）。
 """
 import json
+import urllib.error
 import urllib.request
 
 from sqlalchemy import select

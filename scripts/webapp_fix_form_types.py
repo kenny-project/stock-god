@@ -7,8 +7,8 @@ register._form_of 匹配不到，125 条存量记录落入 UNKNOWN。
 核心逻辑在 webapp/backend/services/form_fix.py（含匹配规则说明与单测）。
 
 用法（仓库根目录运行）:
-    python3 scripts/webapp_fix_form_types.py             # 实际写库
-    python3 scripts/webapp_fix_form_types.py --dry-run   # 预览不写库
+    python3 scripts/webapp_fix_form_types.py             # 默认 dry-run 预览不写库
+    python3 scripts/webapp_fix_form_types.py --apply     # 实际写库
     python3 scripts/webapp_fix_form_types.py --db data/stock_god.db
 幂等：修过的行不再是 UNKNOWN，重复运行无副作用；映射不到的保持 UNKNOWN 并列出，不臆造。
 """
@@ -23,7 +23,7 @@ DEFAULT_DB = os.path.join(REPO_ROOT, "data", "stock_god.db")
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--dry-run", action="store_true", help="预览不写库")
+    ap.add_argument("--apply", action="store_true", help="实际写库（默认仅预览，不写库）")
     ap.add_argument("--db", default=os.environ.get("STOCKGOD_DB", DEFAULT_DB))
     args = ap.parse_args()
 
@@ -34,10 +34,10 @@ def main() -> int:
 
     engine = make_engine(args.db)
     with make_session_factory(engine)() as session:
-        stats = fix_unknown_filings(session, dry_run=args.dry_run)
+        stats = fix_unknown_filings(session, dry_run=not args.apply)
 
-    mode = "（dry-run 预览，未写库）" if args.dry_run else ""
-    print(f"UNKNOWN 总数 {stats['total']}，{'待修复' if args.dry_run else '已修复'} "
+    mode = "（dry-run 预览，未写库）" if not args.apply else ""
+    print(f"UNKNOWN 总数 {stats['total']}，{'已修复' if args.apply else '待修复'} "
           f"{stats['fixed']} 条 {mode}")
     for ticker, form, period in stats["skipped_conflict"]:
         print(f"  跳过(唯一约束冲突): {ticker} {form} {period}")

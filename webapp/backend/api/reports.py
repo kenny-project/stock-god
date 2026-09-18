@@ -1,4 +1,5 @@
 import os
+import re
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy import select
@@ -83,9 +84,9 @@ def filing_file(filing_id: int, download: bool = False, db: Session = Depends(ge
     if not full.startswith(os.path.realpath(ROOT) + os.sep) or not os.path.isfile(full):
         raise HTTPException(404, f"财报文件缺失: {f.local_path}")
     ext = os.path.splitext(full)[1].lower()
-    name = os.path.basename(full)
-    # 打开（inline，浏览器按 Content-Type 预览）与下载（attachment）拆开；
-    # 文件名来自 local_path 的 basename（EDGAR 下载名，纯 ASCII），可安全放入 header
+    # basename 后仍过滤引号/换行，防止破坏 Content-Disposition header 结构
+    name = re.sub(r'["\r\n]', "", os.path.basename(full))
+    # 打开（inline，浏览器按 Content-Type 预览）与下载（attachment）拆开
     disposition = f'attachment; filename="{name}"' if download else "inline"
     return FileResponse(full, media_type=_MD_TYPES.get(ext, "application/octet-stream"),
                         headers={"Content-Disposition": disposition})
