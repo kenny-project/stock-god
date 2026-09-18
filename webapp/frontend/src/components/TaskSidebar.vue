@@ -11,7 +11,7 @@
           <span
             v-if="t.task_type === 'download' && t.progress_total > 0"
             class="ts-progress"
-          >{{ t.progress_done || 0 }}/{{ t.progress_total }}</span>
+          >{{ Math.min(t.progress_done || 0, t.progress_total) }}/{{ t.progress_total }}</span>
           <span class="status" :class="t.status">
             {{ statusLabel(t.status) }}<template v-if="t.status === 'failed' && t.error_code"> [{{ t.error_code }}]</template>
           </span>
