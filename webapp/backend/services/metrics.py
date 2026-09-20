@@ -67,6 +67,14 @@ def parse_dcf_valuation(text: str) -> dict:
             iv = _to_number(raw)
             if iv is not None:
                 v["intrinsic_value_musd"] = iv
+    # "### 每股估值" 小节：每股口径（与股价同量纲）；旧报告缺该小节时这些键缺席。
+    # 表内键可能带 ** 加粗（| **每股内在价值** | **$127.42** |），先剥掉再比对
+    ps = {k.replace("*", ""): raw for k, raw in _table_rows(text, "每股估值")}
+    for key, out in [("每股内在价值", "intrinsic_value_per_share"),
+                     ("25%安全边际价格", "safety_25_price"),
+                     ("50%安全边际价格", "safety_50_price")]:
+        if key in ps and (val := _to_number(ps[key])) is not None:
+            v[out] = val
     years = []
     # 只认 Owner Earnings 小节里的 `| FY...` 年度行；
     # 敏感性分析表有 `| 20% | $47 | ...` 这类增长率行，全篇扫描会把它编造成年度数据

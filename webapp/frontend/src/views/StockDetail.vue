@@ -98,7 +98,10 @@
             （增长{{ d.growth }}% / 折现{{ d.discount }}%）
           </span>
           <span v-if="d.valuation" class="muted">
-            内在价值 ${{ d.valuation.intrinsic_value_musd }}M，现价 ${{ d.valuation.price }}
+            <template v-if="d.valuation.intrinsic_value_per_share != null">
+              每股 ${{ d.valuation.intrinsic_value_per_share }}，现价 ${{ d.valuation.price }}
+            </template>
+            <template v-else>内在价值 ${{ d.valuation.intrinsic_value_musd }}M，现价 ${{ d.valuation.price }}</template>
           </span>
         </div>
         <p v-if="!dcfList.length" class="empty">暂无 DCF 报告，可点击上方"DCF 估值"发起</p>

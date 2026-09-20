@@ -73,6 +73,43 @@ def test_parse_dcf_valuation():
     assert v["price"] == 36.80
     assert len(v["owner_earnings_by_year"]) == 5   # FY2022..FY2026
     assert v["owner_earnings_by_year"][0]["oe"] == 6308
+    # "### 每股估值" 小节：每股口径（与股价同量纲），键带 ** 加粗
+    assert v["intrinsic_value_per_share"] == 31.80
+    assert v["safety_25_price"] == 23.85
+    assert v["safety_50_price"] == 15.90
+
+
+def test_parse_dcf_valuation_aapl_per_share():
+    """真实 AAPL 报告：总市值口径（$M）与每股口径必须同时解析出来，互不覆盖。"""
+    with open(os.path.join(FIX, "US.AAPL_DCF.md"), encoding="utf-8") as f:
+        text = f.read()
+    v = parse_dcf_valuation(text)
+    assert v["price"] == 332.27
+    assert v["intrinsic_value_musd"] == 1859624
+    assert v["intrinsic_value_per_share"] == 127.42
+    assert v["safety_25_price"] == 95.57
+    assert v["safety_50_price"] == 63.71
+
+
+def test_parse_dcf_valuation_without_per_share_section():
+    """旧报告无 每股估值 小节：每股字段缺席（不编造），旧字段照常解析。"""
+    text = """## 基本信息
+
+| 指标 | 数值 |
+|:---|:---|
+| 当前股价 | $36.80 |
+
+## 估值结果
+
+| 指标 | 数值 |
+|:---|:---|
+| 内在价值（$M） | $47,099M |
+"""
+    v = parse_dcf_valuation(text)
+    assert v["price"] == 36.80
+    assert v["intrinsic_value_musd"] == 47099
+    assert "intrinsic_value_per_share" not in v
+    assert "safety_25_price" not in v
 
 
 def test_parse_dcf_valuation_fy_rows_scoped_to_owner_earnings():
