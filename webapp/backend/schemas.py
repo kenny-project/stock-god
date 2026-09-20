@@ -48,6 +48,7 @@ class AnalysisOut(BaseModel):
     form_type: str
     fiscal_year: int
     quarter: str | None = None  # 季报有值（如 "2024Q3"），年报为 None
+    period: str | None = None  # 配对到的财报报告期（filing.period），配不到为 None
     metrics: dict | None
     generated_at: datetime
 

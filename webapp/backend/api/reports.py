@@ -2,7 +2,7 @@ import os
 import re
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 from db import ROOT
 from deps import get_db
@@ -37,9 +37,47 @@ def _get_stock(db: Session, ticker: str) -> Stock:
 @router.get("/stocks/{ticker}/analyses", response_model=list[AnalysisOut])
 def list_analyses(ticker: str, db: Session = Depends(get_db)):
     st = _get_stock(db, ticker)
-    # 同财年再加 quarter 次序（SQLite DESC 下 NULL 年报排在同财年季报之后）
-    return db.scalars(select(Analysis).where(Analysis.stock_id == st.id)
-                      .order_by(Analysis.fiscal_year.desc(), Analysis.quarter.desc())).all()
+    analyses = db.scalars(select(Analysis).where(Analysis.stock_id == st.id)).all()
+    # 按 form_type 分组配对 filing.period：双方升序后从最新端（尾部）对齐 zip，
+    # 最长公共尾部一一对应；多出的老分析配不到 period 置 None（不编造日期）。
+    # UNKNOWN 等历史遗留 form_type 的 filing 只与同 form_type 的分析配对。
+    filings: dict[str, list[Filing]] = {}
+    for f in db.scalars(select(Filing).where(Filing.stock_id == st.id)):
+        filings.setdefault(f.form_type, []).append(f)
+    for group in filings.values():
+        group.sort(key=lambda f: f.period or "")
+    groups: dict[str, list[Analysis]] = {}
+    for a in analyses:
+        groups.setdefault(a.form_type, []).append(a)
+    for ft, group in groups.items():
+        group.sort(key=lambda a: (a.fiscal_year, a.quarter or ""))
+        for a, f in zip(reversed(group), reversed(filings.get(ft, []))):
+            a.period = f.period  # 临时属性挂 ORM 实例（不落库），供 from_attributes 校验
+    out = [AnalysisOut.model_validate(a) for a in analyses]
+    # period 降序（None 置底），period 相同/None 时按 财年、季度（NULL 同空串）、生成时间 降序
+    out.sort(key=lambda x: x.generated_at, reverse=True)
+    out.sort(key=lambda x: x.quarter or "", reverse=True)
+    out.sort(key=lambda x: x.fiscal_year, reverse=True)
+    out.sort(key=lambda x: (x.period is not None, x.period or ""), reverse=True)
+    return out
+
+
+@router.delete("/stocks/{ticker}/analyses")
+def clear_analyses(ticker: str, db: Session = Depends(get_db)):
+    """清空该股全部分析记录：删 analysis 行 + 删磁盘分析文件（仅限 sec_analysis/{ticker}/ 内）。"""
+    st = _get_stock(db, ticker)
+    analyses = db.scalars(select(Analysis).where(Analysis.stock_id == st.id)).all()
+    base = os.path.realpath(os.path.join(ROOT, "reports", "sec_analysis", st.ticker)) + os.sep
+    for a in analyses:
+        full = os.path.realpath(os.path.join(ROOT, a.local_path))
+        if full.startswith(base) and os.path.isfile(full):
+            try:
+                os.remove(full)
+            except OSError:
+                pass  # 单个文件删不掉不阻塞清库
+    db.execute(delete(Analysis).where(Analysis.stock_id == st.id))
+    db.commit()
+    return {"deleted": len(analyses)}
 
 
 @router.get("/stocks/{ticker}/analyses/{analysis_id}")

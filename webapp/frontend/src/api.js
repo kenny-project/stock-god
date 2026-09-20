@@ -19,6 +19,7 @@ export const api = {
   stock: (t) => req(`/api/stocks/${t}`),
   analyses: (t) => req(`/api/stocks/${t}/analyses`),
   analysis: (t, id) => req(`/api/stocks/${t}/analyses/${id}`),
+  clearAnalyses: (t) => req(`/api/stocks/${t}/analyses`, { method: 'DELETE' }),
   dcf: (t) => req(`/api/stocks/${t}/dcf`),
   dcfOne: (t, id) => req(`/api/stocks/${t}/dcf/${id}`),
   tasks: (status = '') => req(`/api/tasks${status ? `?status=${status}` : ''}`),

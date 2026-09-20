@@ -71,15 +71,26 @@
 
     <!-- 财报分析 -->
     <div v-else-if="tab === 'analysis'">
-      <div class="item-list">
-        <div v-for="a in analyses" :key="a.id" class="item clickable"
-             :class="{ active: activeAnalysisId === a.id }" @click="loadAnalysis(a)">
-          {{ a.form_type }} {{ a.quarter || 'FY' + a.fiscal_year }}
-          <span class="muted">{{ fmt(a.generated_at) }}</span>
+      <template v-if="viewMode === 'list'">
+        <div class="list-toolbar">
+          <button class="btn" :disabled="!analyses.length || clearing" @click="clearAllAnalyses">清空分析</button>
         </div>
-        <p v-if="!analyses.length" class="empty">暂无分析报告，请先下载财报并生成分析</p>
-      </div>
-      <MarkdownViewer v-if="analysisMd" :source="analysisMd" />
+        <div class="item-list">
+          <div v-for="a in analyses" :key="a.id" class="item clickable"
+               :class="{ active: activeAnalysisId === a.id }" @click="loadAnalysis(a)">
+            {{ a.form_type }} {{ a.quarter || 'FY' + a.fiscal_year }}
+            <span class="muted">{{ a.period }}</span>
+          </div>
+          <p v-if="!analyses.length" class="empty">暂无分析报告，请先下载财报并生成分析</p>
+        </div>
+      </template>
+      <template v-else>
+        <div class="detail-toolbar">
+          <button class="btn" @click="viewMode = 'list'">← 返回</button>
+          <span class="detail-title">{{ analysisTitle }}</span>
+        </div>
+        <MarkdownViewer v-if="analysisMd" :source="analysisMd" />
+      </template>
     </div>
 
     <!-- 图表 -->
@@ -132,6 +143,8 @@ const tab = ref('filings'), showDcf = ref(false)
 const aliasEditing = ref(false), aliasInput = ref('')
 const analysisMd = ref(''), dcfMd = ref('')
 const activeAnalysisId = ref(null), activeDcfId = ref(null)
+const viewMode = ref('list') // 分析 Tab 页内视图：list=列表，detail=单篇分析正文
+const clearing = ref(false) // 清空分析请求进行中，防连点
 const dcfForm = reactive({ growth: '', discount: '', years: '', safety: '' })
 const message = ref(''), messageType = ref('success')
 let toastTimer, pollTimer, seq = 0
@@ -157,6 +170,12 @@ const sortedFilings = computed(() => {
 })
 // metricsSeries 恒含两条序列（构造函数 map 产出），需按真实数据有无判断空态
 const hasMetrics = computed(() => metricsSeries.value.some((s) => s.values.some((v) => v != null)))
+// 详情页标题：form_type + 季度/财年 + 报告期
+const analysisTitle = computed(() => {
+  const a = analyses.value.find((x) => x.id === activeAnalysisId.value)
+  if (!a) return ''
+  return `${a.form_type} ${a.quarter || 'FY' + a.fiscal_year}${a.period ? ' · ' + a.period : ''}`
+})
 const fmt = (s) => (s ? new Date(s).toLocaleString('zh-CN', { hour12: false }) : '')
 
 function showToast(text, type = 'success') {
@@ -189,6 +208,7 @@ async function loadAll() {
     dcfMd.value = ''
     activeAnalysisId.value = null
     activeDcfId.value = null
+    viewMode.value = 'list'
     buildMetricsSeries(aList)
   } catch (e) {
     if (my === seq) showToast('加载失败', 'error')
@@ -202,8 +222,23 @@ async function loadAnalysis(a) {
     if (my !== seq) return
     activeAnalysisId.value = a.id
     analysisMd.value = d.markdown
+    viewMode.value = 'detail'
   } catch {
     if (my === seq) showToast('加载分析报告失败', 'error')
+  }
+}
+
+async function clearAllAnalyses() {
+  if (!confirm(`清空 ${props.ticker} 的全部分析记录与文件？`)) return
+  clearing.value = true
+  try {
+    await api.clearAnalyses(props.ticker)
+    showToast('分析已清空')
+    await loadAll()  // 会重置 viewMode/正文/选中态
+  } catch (e) {
+    showToast(e.message || '清空失败', 'error')
+  } finally {
+    clearing.value = false
   }
 }
 
@@ -297,6 +332,10 @@ onUnmounted(() => { clearInterval(pollTimer); clearTimeout(toastTimer) })
 .item-list { padding: 8px 0; }
 .item { padding: 8px 12px; border-bottom: 1px solid #eee; }
 .item.active { color: #0366d6; background: #f6f8fa; }
+.list-toolbar { display: flex; justify-content: flex-end; padding: 4px 0; }
+.detail-toolbar { display: flex; align-items: center; gap: 12px; padding: 8px 0 12px; }
+.detail-title { font-weight: 600; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
 .muted { color: #666; font-size: 13px; margin-left: 8px; }
 .sortable { cursor: pointer; user-select: none; white-space: nowrap; }
 .sortable:hover { color: #2563eb; }
