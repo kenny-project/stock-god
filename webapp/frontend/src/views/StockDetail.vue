@@ -19,18 +19,27 @@
       <button class="btn" @click="submit('download', { years: 5 })">下载财报</button>
       <button class="btn" @click="submit('analysis', {})">生成分析</button>
       <button class="btn" :disabled="!analyses.length || clearing" @click="clearAllAnalyses">清空分析</button>
-      <button class="btn" @click="showDcf = !showDcf">DCF 估值</button>
+      <button class="btn" @click="openDcf">DCF 估值</button>
       <span v-for="t in detail.running_tasks" :key="t.id" class="status running">
         {{ taskLabel(t.task_type) }} #{{ t.id }} 进行中
       </span>
     </div>
 
-    <div v-if="showDcf" class="dcf-panel">
-      <label>增长率% <input type="number" step="0.1" v-model="dcfForm.growth" /></label>
-      <label>折现率% <input type="number" step="0.1" v-model="dcfForm.discount" /></label>
-      <label>年限 <input type="number" step="1" v-model="dcfForm.years" /></label>
-      <label>安全边际% <input type="number" step="1" v-model="dcfForm.safety" /></label>
-      <button class="btn primary" @click="submitDcf">开始估值</button>
+    <!-- DCF 估值参数弹窗 -->
+    <div v-if="dcfModal" class="modal-mask" @click.self="dcfModal = false">
+      <div class="modal-card">
+        <h3 class="modal-title">DCF 估值参数</h3>
+        <div class="modal-body">
+          <label>增长率% <input type="number" step="0.1" v-model="dcfForm.growth" /></label>
+          <label>折现率% <input type="number" step="0.1" v-model="dcfForm.discount" /></label>
+          <label>年限 <input type="number" step="1" v-model="dcfForm.years" /></label>
+          <label>安全边际% <input type="number" step="1" v-model="dcfForm.safety" /></label>
+        </div>
+        <div class="modal-actions">
+          <button class="btn primary" @click="submitDcf">开始估值</button>
+          <button class="btn" @click="dcfModal = false">取消</button>
+        </div>
+      </div>
     </div>
 
     <div class="tabs">
@@ -137,7 +146,7 @@ const taskStore = useTaskStore()
 
 const detail = ref(null), analyses = ref([]), dcfList = ref([])
 const metricsSeries = ref([]) // Task 14 图表数据：[{ name:'营收', years:[...], values:[...] }, ...]
-const tab = ref('filings'), showDcf = ref(false)
+const tab = ref('filings'), dcfModal = ref(false) // dcfModal：DCF 参数弹窗开关
 const aliasEditing = ref(false), aliasInput = ref('')
 const analysisMd = ref(''), dcfMd = ref('')
 const activeAnalysisId = ref(null), activeDcfId = ref(null)
@@ -296,17 +305,27 @@ async function submit(type, params) {
     await taskStore.submit(type, props.ticker, params)
     showToast('任务已提交，可在任务中心查看进度')
     watchUntilDone(props.ticker)
+    return true
   } catch (e) {
     if (e?.status === 409) showToast('已有同类型任务进行中', 'error')
     else showToast(`提交失败: ${e.message}`, 'error')
+    return false
   }
 }
 
-function submitDcf() {
+// 弹窗默认参数（与后端 dcf.py 默认一致）：增长率 8%、折现率 10%、年限 5、安全边际 30%
+const DCF_DEFAULTS = { growth: 8, discount: 10, years: 5, safety: 30 }
+function openDcf() {
+  Object.assign(dcfForm, DCF_DEFAULTS)
+  dcfModal.value = true
+}
+
+async function submitDcf() {
   const num = (v) => (v === '' || v == null ? null : Number(v))
   const g = num(dcfForm.growth), di = num(dcfForm.discount)
   const y = num(dcfForm.years), s = num(dcfForm.safety)
-  submit('dcf', { growth: g, discount: di, years: y, safety: s == null ? null : s / 100 })
+  const ok = await submit('dcf', { growth: g, discount: di, years: y, safety: s == null ? null : s / 100 })
+  if (ok) dcfModal.value = false
 }
 
 onMounted(loadAll)
@@ -327,9 +346,20 @@ onUnmounted(() => { clearInterval(pollTimer); clearTimeout(toastTimer) })
 .alias-list { color: #666; font-size: 13px; font-weight: normal; }
 .alias-panel { display: flex; gap: 8px; align-items: center; padding: 8px 0 12px; }
 .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 0 12px; }
-.dcf-panel { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 12px; background: #f6f8fa; border-radius: 6px; margin-bottom: 12px; }
-.dcf-panel label { font-size: 13px; display: flex; align-items: center; gap: 6px; }
-.dcf-panel input { width: 90px; padding: 4px 8px; }
+/* DCF 参数弹窗：遮罩盖全屏（z-index 100，低于 toast 的 1000），点击遮罩空白处关闭 */
+.modal-mask {
+  position: fixed; inset: 0; z-index: 100; background: rgba(0, 0, 0, .45);
+  display: flex; align-items: center; justify-content: center;
+}
+.modal-card {
+  width: 360px; max-width: calc(100vw - 48px); background: #fff;
+  border-radius: 8px; padding: 16px 20px; box-shadow: 0 8px 32px rgba(0, 0, 0, .2);
+}
+.modal-title { margin: 0 0 12px; font-size: 16px; }
+.modal-body { display: flex; flex-direction: column; gap: 10px; }
+.modal-body label { font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.modal-body input { width: 90px; padding: 4px 8px; }
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 .item-list { padding: 8px 0; }
 .item { padding: 8px 12px; border-bottom: 1px solid #eee; }
 .item.active { color: #0366d6; background: #f6f8fa; }
