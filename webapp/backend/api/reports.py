@@ -2,7 +2,7 @@ import os
 import re
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 from db import ROOT
 from deps import get_db
@@ -43,6 +43,8 @@ def list_analyses(ticker: str, db: Session = Depends(get_db)):
     # UNKNOWN 等历史遗留 form_type 的 filing 只与同 form_type 的分析配对。
     filings: dict[str, list[Filing]] = {}
     for f in db.scalars(select(Filing).where(Filing.stock_id == st.id)):
+        if f.period is None:
+            continue  # period 未知的 filing 不进配对池：宁缺毋滥，避免静默错位
         filings.setdefault(f.form_type, []).append(f)
     for group in filings.values():
         group.sort(key=lambda f: f.period or "")
@@ -66,6 +68,12 @@ def list_analyses(ticker: str, db: Session = Depends(get_db)):
 def clear_analyses(ticker: str, db: Session = Depends(get_db)):
     """清空该股全部分析记录：删 analysis 行 + 删磁盘分析文件（仅限 sec_analysis/{ticker}/ 内）。"""
     st = _get_stock(db, ticker)
+    # 并发防护：清空与分析/DCF 任务并行会产生竞态（任务回写孤儿记录或删掉任务产物），先拒绝
+    busy = db.scalar(select(func.count(Task.id)).where(
+        Task.stock_id == st.id, Task.task_type.in_(("analysis", "dcf")),
+        Task.status.in_(("pending", "running"))))
+    if busy:
+        raise HTTPException(409, "该股票有分析/DCF 任务进行中，请先取消或等待完成")
     analyses = db.scalars(select(Analysis).where(Analysis.stock_id == st.id)).all()
     base = os.path.realpath(os.path.join(ROOT, "reports", "sec_analysis", st.ticker)) + os.sep
     for a in analyses:

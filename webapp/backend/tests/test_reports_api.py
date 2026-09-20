@@ -254,6 +254,29 @@ async def test_analyses_pairing_extra_analyses(env):
             ("2026Q1", None), ("2025Q4", None)]
 
 
+async def test_analyses_pairing_extra_filings(env):
+    """财报多于分析：尾部对齐后老端多出的 filings 被 zip 丢弃，分析全部配到正确的最新 period。"""
+    client, Factory, _ = env
+    sid = _add_stock(Factory, "QCOM")
+    with Factory() as s:
+        from models import Filing, Analysis
+        for period in ("2025-03-30", "2025-06-29", "2026-03-30", "2026-06-29"):
+            s.add(Filing(stock_id=sid, form_type="10-Q", period=period,
+                         local_path=f"reports/sec_filings/QCOM/10-Q_{period}.htm"))
+        # period=None 的 filing 不进配对池，不影响其余配对结果
+        s.add(Filing(stock_id=sid, form_type="10-Q", period=None,
+                     local_path="reports/sec_filings/QCOM/10-Q_unknown.htm"))
+        for fy, q in [(2026, "2026Q2"), (2026, "2026Q3")]:
+            s.add(Analysis(stock_id=sid, form_type="10-Q", fiscal_year=fy, quarter=q,
+                           local_path=f"reports/sec_analysis/QCOM/10-Q_{q}.md", metrics={}))
+        s.commit()
+    async with client as c:
+        body = (await c.get("/api/stocks/QCOM/analyses")).json()
+        # 2 条分析各自配到最新 2 个 period，老端 2 份财报（含 period=None）被丢弃
+        assert [(a["quarter"], a["period"]) for a in body] == [
+            ("2026Q3", "2026-06-29"), ("2026Q2", "2026-03-30")]
+
+
 async def test_analyses_pairing_mixed_forms(env):
     """多 form_type 各自独立配对；UNKNOWN filing 不参与；年报与季报按 period 降序混排，None 置底。"""
     client, Factory, _ = env
@@ -321,3 +344,31 @@ async def test_clear_analyses(env, tmp_path, monkeypatch):
         # 再删一次：已无分析 → deleted 0
         r2 = await c.delete("/api/stocks/NKE/analyses")
         assert r2.status_code == 200 and r2.json() == {"deleted": 0}
+
+
+async def test_clear_analyses_conflict_409(env):
+    """有 analysis/dcf 任务 pending/running 时清空被 409 拦截，不删任何分析；任务结束后可清。"""
+    client, Factory, _ = env
+    with Factory() as s:
+        from models import Stock, Task
+        st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+        s.add(Task(task_type="analysis", stock_id=st.id, status="running"))
+        s.add(Task(task_type="dcf", stock_id=st.id, status="pending"))
+        s.add(Task(task_type="download", stock_id=st.id, status="running"))  # 无关类型不拦截
+        s.commit()
+    async with client as c:
+        r = await c.delete("/api/stocks/NKE/analyses")
+        assert r.status_code == 409
+        assert r.json() == {"detail": "该股票有分析/DCF 任务进行中，请先取消或等待完成"}
+        with Factory() as s:
+            from models import Stock, Task, Analysis
+            st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+            assert s.scalar(select(func.count(Analysis.id))
+                            .where(Analysis.stock_id == st.id)) == 1  # 未被删除
+        # 任务结束（failed）后恢复正常清空
+        with Factory() as s:
+            for t in s.scalars(select(Task).where(Task.stock_id == st.id)).all():
+                t.status = "failed"
+            s.commit()
+        r2 = await c.delete("/api/stocks/NKE/analyses")
+        assert r2.status_code == 200 and r2.json() == {"deleted": 1}

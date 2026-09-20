@@ -18,6 +18,7 @@
     <div class="actions">
       <button class="btn" @click="submit('download', { years: 5 })">下载财报</button>
       <button class="btn" @click="submit('analysis', {})">生成分析</button>
+      <button class="btn" :disabled="!analyses.length || clearing" @click="clearAllAnalyses">清空分析</button>
       <button class="btn" @click="showDcf = !showDcf">DCF 估值</button>
       <span v-for="t in detail.running_tasks" :key="t.id" class="status running">
         {{ taskLabel(t.task_type) }} #{{ t.id }} 进行中
@@ -72,9 +73,6 @@
     <!-- 财报分析 -->
     <div v-else-if="tab === 'analysis'">
       <template v-if="viewMode === 'list'">
-        <div class="list-toolbar">
-          <button class="btn" :disabled="!analyses.length || clearing" @click="clearAllAnalyses">清空分析</button>
-        </div>
         <div class="item-list">
           <div v-for="a in analyses" :key="a.id" class="item clickable"
                :class="{ active: activeAnalysisId === a.id }" @click="loadAnalysis(a)">
@@ -204,11 +202,14 @@ async function loadAll() {
     detail.value = stock
     analyses.value = aList
     dcfList.value = dList
-    analysisMd.value = ''
+    // 数据刷新不踢出已打开的分析详情：仅当选中的分析不在新列表（被清空/换股）时才重置视图
+    if (!aList.some((a) => a.id === activeAnalysisId.value)) {
+      analysisMd.value = ''
+      activeAnalysisId.value = null
+      viewMode.value = 'list'
+    }
     dcfMd.value = ''
-    activeAnalysisId.value = null
     activeDcfId.value = null
-    viewMode.value = 'list'
     buildMetricsSeries(aList)
   } catch (e) {
     if (my === seq) showToast('加载失败', 'error')
@@ -332,7 +333,6 @@ onUnmounted(() => { clearInterval(pollTimer); clearTimeout(toastTimer) })
 .item-list { padding: 8px 0; }
 .item { padding: 8px 12px; border-bottom: 1px solid #eee; }
 .item.active { color: #0366d6; background: #f6f8fa; }
-.list-toolbar { display: flex; justify-content: flex-end; padding: 4px 0; }
 .detail-toolbar { display: flex; align-items: center; gap: 12px; padding: 8px 0 12px; }
 .detail-title { font-weight: 600; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
