@@ -1,5 +1,6 @@
 import os
 import shutil
+from datetime import datetime
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 from db import Base, ROOT
@@ -161,3 +162,29 @@ def test_register_dcf_from_fixture(tmp_path):
     n2 = register_dcf(s, st, base_dir=str(base))
     assert n2 == 0  # 幂等：同一 local_path 不重复登记
     assert s.scalar(select(func.count(DcfReport.id))) == 1
+
+
+def test_register_dcf_timestamped_filename_new_row_per_run(tmp_path):
+    """dcf.py 文件名带秒级时间戳后（{TICKER}_DCF_{YYYYMMDD_HHMMSS}.md），
+    每次估值落独立文件、新建一条记录：前缀过滤仍命中带时间戳的名字，
+    generated_at 取各自文件 mtime；同一文件重复登记仍幂等不新增。"""
+    s = _session()
+    st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+    base = tmp_path / "reports" / "dcf"
+    base.mkdir(parents=True)
+    mt1, mt2 = 1000000000, 1700000000
+    f1 = base / "US.NKE_DCF_20260919_100000.md"
+    f2 = base / "US.NKE_DCF_20260920_115903.md"
+    for f, mt in ((f1, mt1), (f2, mt2)):
+        shutil.copy(os.path.join(FIXTURES, "US.NKE_DCF.md"), f)
+        os.utime(f, (mt, mt))
+    n = register_dcf(s, st, base_dir=str(base))
+    assert n == 2
+    rows = {os.path.basename(r.local_path): r for r in s.scalars(select(DcfReport)).all()}
+    assert len(rows) == 2
+    assert rows[f1.name].generated_at == datetime.fromtimestamp(mt1)
+    assert rows[f2.name].generated_at == datetime.fromtimestamp(mt2)
+    assert rows[f1.name].valuation["intrinsic_value_musd"] == 47099
+    # 同一文件重复登记仍不重复（幂等保留）
+    assert register_dcf(s, st, base_dir=str(base)) == 0
+    assert s.scalar(select(func.count(DcfReport.id))) == 2

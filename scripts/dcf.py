@@ -956,11 +956,12 @@ def main():
                               "currency": cur, "base_period": base_oe_note},
                              data_source="SEC", warnings=warnings)
 
-    # 保存报告（文件名不带日期：每家公司只保留最新一份，重跑直接覆盖；
-    # 报告内容里的生成时间已标明计算日期）
+    # 保存报告（文件名带秒级时间戳：每次估值落一份独立文件，重跑不覆盖历史；
+    # webapp 的 register_dcf 按 local_path 去重，时间戳保证每次估值在库里新建一条记录）
     output_dir = os.path.join(REPORTS_DIR, "dcf")
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f"{ticker}_DCF.md")
+    output_path = os.path.join(
+        output_dir, f"{ticker}_DCF_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(report)

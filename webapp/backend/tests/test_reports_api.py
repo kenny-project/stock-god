@@ -46,9 +46,16 @@ def env():
     return client, Factory, ids
 
 
-async def test_analysis_content(env):
+async def test_analysis_content(env, tmp_path, monkeypatch):
     client, _, ids = env
     _, aid, _ = ids
+    # 报告正文端点从磁盘读取：用 tmp root 固定文件，
+    # 不依赖真实 reports/ 目录（可能被分析任务重建/清理）
+    root = tmp_path / "root"
+    base = root / "reports" / "sec_analysis" / "NKE"
+    base.mkdir(parents=True)
+    (base / "10-K_FY2025.md").write_text("# NKE 10-K FY2025\n", encoding="utf-8")
+    monkeypatch.setattr("api.reports.ROOT", str(root))
     async with client as c:
         r = await c.get("/api/stocks/NKE/analyses")
         assert r.status_code == 200 and len(r.json()) == 1
