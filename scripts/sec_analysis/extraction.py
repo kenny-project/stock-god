@@ -695,9 +695,19 @@ def extract_key_metrics(text: str, html: str = None, quarterly: bool = False) ->
                 continue
             # 10-Q：收益表科目（duration context）筛选单季，避免取到 YTD 累计值
             if quarterly and key in _DURATION_METRIC_KEYS:
-                insts = _filter_quarter_spans(html, insts, spans)
-                if not insts:
+                quarter_insts = _filter_quarter_spans(html, insts, spans)
+                if not quarter_insts:
+                    # iXBRL 中存在该科目实例，但识别不出单季 context（80-100 天，
+                    # 如仅披露 YTD 累计 context）。文本回退值来自多列报表按行取数，
+                    # 大概率是累计列或上年同期列——财务数据不可造假：置空并告警，
+                    # 宁缺勿错，绝不用无法确证单季口径的值冒充单季
+                    if key in metrics:
+                        metrics.pop(key)
+                        metrics.pop(key + "_num", None)
+                        print(f"   ⚠️  10-Q 未识别出 {key} 的单季 context（仅有 YTD 累计），"
+                              f"文本回退值已置空")
                     continue
+                insts = quarter_insts
             chosen = max(insts, key=lambda m: int(m.group(1).replace(",", "")))
             try:
                 value, currency = _xbrl_parse(html, chosen)
@@ -721,6 +731,14 @@ def extract_key_metrics(text: str, html: str = None, quarterly: bool = False) ->
                 quarter_insts = _filter_quarter_spans(html, eps_insts, spans)
                 if quarter_insts:
                     eps_insts = quarter_insts
+                else:
+                    # 同收益表科目：识别不出单季 context（仅 YTD 累计）时置空告警，
+                    # 不用累计 EPS 冒充单季
+                    if "eps" in metrics:
+                        metrics.pop("eps")
+                        print("   ⚠️  10-Q 未识别出 EPS 的单季 context（仅有 YTD 累计），"
+                              "文本回退值已置空")
+                    break
             chosen = eps_insts[0]
             currency = "¥" if ("RMB" in _xbrl_attr(html, chosen, "unitRef").upper()
                                or "CNY" in _xbrl_attr(html, chosen, "unitRef").upper()) else "$"

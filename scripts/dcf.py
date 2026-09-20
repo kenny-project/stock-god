@@ -204,7 +204,7 @@ def compute_ttm(annual, quarterly):
 
 # ── 数据验证 ────────────────────────────────────────────
 
-def validate_sec_data(sec_data):
+def validate_sec_data(sec_data, quarterly_data=None):
     """
     验证 SEC 提取数据的质量和合理性。
 
@@ -213,6 +213,11 @@ def validate_sec_data(sec_data):
     2. 关键字段是否为 0（折旧、CapEx、现金流）
     3. 数值是否在合理范围内（相对营收的比例）
     4. 交叉验证（FCF ≈ CFO - CapEx）
+    5. 季报单季列口径（净利率异常 + 同年 NI 环比异常跳变）
+
+    参数：
+      sec_data: 年报记录列表
+      quarterly_data: 季报记录列表（可选，用于单季列口径检查）
 
     返回 (errors, warnings):
       errors: 严重问题，应终止计算
@@ -321,6 +326,37 @@ def validate_sec_data(sec_data):
                 warnings.append(
                     f"[{period}] 折旧和 CapEx 均为 0 — Owner Earnings 将退化为 FCF，"
                     f"估值结果不可靠"
+                )
+
+    # ── 6. 季报单季列口径检查 ──
+    # 10-Q 收益表同页披露 Three/Six/Nine Months 多组列，取错列会把累计值当单季，
+    # TTM/DCF 被显著抬高。以下均为 warning（不阻断）：高净利率也可能来自真实的
+    # 大额一次性损益，标记后需人工核对原文单季列。
+    for record in list(sec_data) + list(quarterly_data or []):
+        revenue = record.get("revenue", 0)
+        net_income = record.get("net_income")
+        period = record.get("period", "未知")
+        if revenue and revenue > 0 and net_income is not None and net_income / revenue > 0.60:
+            warnings.append(
+                f"[{period}] 净利率 {net_income / revenue * 100:.1f}% — "
+                f"疑似利润表取到累计列（或存在大额一次性损益），建议核对 10-Q 单季数据"
+            )
+
+    # 同年季报 NI 环比异常跳变：Q(n) < Q(n-1) 但 Q(n+1) > Q(n-1)×1.5，
+    # 典型的单季/累计列混取特征
+    ni_by_year = {}
+    for record in quarterly_data or []:
+        fyq = _parse_fyq(record.get("period", ""))
+        if fyq and record.get("net_income") is not None:
+            ni_by_year.setdefault(fyq[0], []).append((fyq[1], record["net_income"]))
+    for year, nis in sorted(ni_by_year.items()):
+        nis.sort()
+        for (q0, ni0), (q1, ni1), (q2, ni2) in zip(nis, nis[1:], nis[2:]):
+            if ni1 < ni0 and ni2 > ni0 * 1.5:
+                warnings.append(
+                    f"[{year} Q{q0}→Q{q2}] 季报净利润环比异常跳变"
+                    f"（Q{q1} {ni1:,} < Q{q0} {ni0:,}，但 Q{q2} {ni2:,} > "
+                    f"Q{q0}×1.5）— 疑似利润表取到累计列，建议核对单季数据"
                 )
 
     return errors, warnings
@@ -798,7 +834,8 @@ def main():
 
     # ── 2.5 数据验证 ──
     print("\n🔍 验证数据质量...")
-    errors, warnings = validate_sec_data(sec_data)
+    quarterly_data = read_sec_quarterly(ticker)
+    errors, warnings = validate_sec_data(sec_data, quarterly_data)
     if warnings:
         for w in warnings:
             print(f"  ⚠️  {w}")
@@ -869,7 +906,6 @@ def main():
     # ── 6. DCF 估值 ──
     # 基期优先用 TTM（最新年报 + 年后季报滚动），年报滞后最多 3 个季度；
     # TTM 成分缺失时回退最新年报
-    quarterly_data = read_sec_quarterly(ticker)
     if quarterly_data:
         print(f"\n📅 读取 {len(quarterly_data)} 期季报数据（用于 TTM 基期）")
     base_oe = owner_earnings_data[-1]["owner_earnings"]
