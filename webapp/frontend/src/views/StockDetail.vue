@@ -42,9 +42,20 @@
     <!-- 财报 -->
     <div v-if="tab === 'filings'">
       <table>
-        <thead><tr><th>类型</th><th>期间</th><th>下载时间</th><th>文件</th></tr></thead>
+        <thead><tr>
+          <th class="sortable" @click="sortFilings('form_type')">
+            类型<span v-if="filingsSort.key === 'form_type'" class="sort-mark">{{ filingsSort.dir === 'asc' ? '↑' : '↓' }}</span>
+          </th>
+          <th class="sortable" @click="sortFilings('period')">
+            期间<span v-if="filingsSort.key === 'period'" class="sort-mark">{{ filingsSort.dir === 'asc' ? '↑' : '↓' }}</span>
+          </th>
+          <th class="sortable" @click="sortFilings('downloaded_at')">
+            下载时间<span v-if="filingsSort.key === 'downloaded_at'" class="sort-mark">{{ filingsSort.dir === 'asc' ? '↑' : '↓' }}</span>
+          </th>
+          <th>文件</th>
+        </tr></thead>
         <tbody>
-          <tr v-for="f in detail.filings" :key="f.id">
+          <tr v-for="f in sortedFilings" :key="f.id">
             <td>{{ f.form_type }}</td>
             <td>{{ f.period }}</td>
             <td>{{ fmt(f.downloaded_at) }}</td>
@@ -124,6 +135,23 @@ let toastTimer, pollTimer, seq = 0
 
 const TASK_LABELS = { download: '下载财报', analysis: '生成分析', dcf: 'DCF 估值' }
 const taskLabel = (t) => TASK_LABELS[t] || t
+// 财报表排序：默认按期间降序（最新在前）；点击列头在升/降间切换，点其他列切到该列
+const filingsSort = reactive({ key: 'period', dir: 'desc' })
+function sortFilings(key) {
+  if (filingsSort.key === key) {
+    filingsSort.dir = filingsSort.dir === 'asc' ? 'desc' : 'asc'
+  } else {
+    filingsSort.key = key
+    filingsSort.dir = key === 'form_type' ? 'asc' : 'desc'
+  }
+}
+const sortedFilings = computed(() => {
+  const mul = filingsSort.dir === 'asc' ? 1 : -1
+  return [...(detail.value?.filings || [])].sort((a, b) => {
+    const av = a[filingsSort.key] ?? '', bv = b[filingsSort.key] ?? ''
+    return av < bv ? -mul : av > bv ? mul : 0
+  })
+})
 // metricsSeries 恒含两条序列（构造函数 map 产出），需按真实数据有无判断空态
 const hasMetrics = computed(() => metricsSeries.value.some((s) => s.values.some((v) => v != null)))
 const fmt = (s) => (s ? new Date(s).toLocaleString('zh-CN', { hour12: false }) : '')
@@ -266,6 +294,9 @@ onUnmounted(() => { clearInterval(pollTimer); clearTimeout(toastTimer) })
 .item { padding: 8px 12px; border-bottom: 1px solid #eee; }
 .item.active { color: #0366d6; background: #f6f8fa; }
 .muted { color: #666; font-size: 13px; margin-left: 8px; }
+.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+.sortable:hover { color: #2563eb; }
+.sort-mark { margin-left: 2px; color: #2563eb; }
 .empty { color: #999; text-align: center; padding: 24px 0; }
 .toast {
   position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
