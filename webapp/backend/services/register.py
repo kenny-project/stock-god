@@ -11,7 +11,8 @@ from services.metrics import parse_analysis_metrics, parse_dcf_valuation
 _PERIOD = re.compile(r"[-_](\d{8})$")
 _FORM = re.compile(r"(10-?K|10-?Q|20-?F|6-?K)", re.I)
 _FY = re.compile(r"FY(\d{4})", re.I)
-# 季报文件名形如 10-Q_2024Q3.md；fiscal_year 直接取季度标签里的年份
+# 季报文件名形如 10-Q_2024Q3.md 或 10-Q_FY2024Q3.md（后者同时含 FY 字样），
+# fiscal_year 直接取季度标签里的年份；匹配顺序必须先于 _FY（见 register_analysis）
 _QTR = re.compile(r"(\d{4})Q([1-4])", re.I)
 _MAIN_EXT = {".htm", ".html", ".pdf"}
 
@@ -112,14 +113,14 @@ def register_analysis(session, stock, base_dir: str | None = None) -> int:
         form = _form_of(name)
         if form is None:
             continue  # 文件名无申报类型（如 {TICKER}_analysis_*.md 旧汇总），跳过不造假
-        fy = _FY.search(name)
         quarter = None
-        if fy is not None:
-            year = int(fy.group(1))  # 年报文件名形如 10-K_FY2024.md，逻辑不变
-        elif (qm := _QTR.search(name)):
-            # 季报文件名形如 10-Q_2024Q3.md：quarter="2024Q3"，fiscal_year 取季度标签年份
+        if (qm := _QTR.search(name)):
+            # 季度标签优先：10-Q_FY2024Q3.md 这类变体同时含 FY 与季度字样，
+            # 若先匹配 _FY 会被误判成年报（quarter=None）挤占年报槽位
             year = int(qm.group(1))
             quarter = f"{qm.group(1)}Q{qm.group(2)}"
+        elif (fy := _FY.search(name)):
+            year = int(fy.group(1))  # 年报文件名形如 10-K_FY2024.md
         else:
             # form token 有、FY/季度标签都没有 → 显式告警后跳过，不静默丢弃
             print(f"[register] skip {name}: no fiscal year/quarter in filename", file=sys.stderr)

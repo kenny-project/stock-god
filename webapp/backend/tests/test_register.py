@@ -132,6 +132,22 @@ def test_register_analysis_from_fixture(tmp_path, capsys):
     assert "10-K_draft.md" in err and "no fiscal year/quarter" in err
 
 
+def test_register_analysis_fy_quarter_variant(tmp_path):
+    """10-Q_FY2024Q3.md 变体：文件名同时含 FY 与季度字样，必须按季度解析
+    （quarter="2024Q3"），不能被 _FY 先命中误判成年报槽位（quarter=None）。"""
+    s = _session()
+    st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+    base = tmp_path / "reports" / "sec_analysis" / "NKE"
+    base.mkdir(parents=True)
+    shutil.copy(os.path.join(FIXTURES, "10-Q_2024Q3.md"), base / "10-Q_FY2024Q3.md")
+    n = register_analysis(s, st, base_dir=str(base))
+    assert n == 1
+    a = s.scalars(select(Analysis)).first()
+    assert a.form_type == "10-Q"
+    assert a.fiscal_year == 2024
+    assert a.quarter == "2024Q3"
+
+
 def test_register_dcf_from_fixture(tmp_path):
     s = _session()
     st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))

@@ -38,7 +38,15 @@ def main() -> int:
     with make_session_factory(engine)() as session:
         rows = session.scalars(select(DcfReport)).all()
         updated, missing, unchanged = 0, [], 0
+        skipped = 0
         for d in rows:
+            stock = session.get(Stock, d.stock_id) if d.stock_id else None
+            if stock is None:
+                # stock 行缺失（孤儿数据）：告警跳过，不臆造 ticker 也不崩溃
+                print(f"警告: dcf_report#{d.id} stock_id={d.stock_id} 对应 stock 缺失，跳过",
+                      file=sys.stderr)
+                skipped += 1
+                continue
             full = os.path.join(ROOT, d.local_path)
             if not os.path.isfile(full):
                 missing.append(d.local_path)
@@ -51,7 +59,7 @@ def main() -> int:
             if valuation == d.valuation:
                 unchanged += 1
                 continue
-            ticker = session.get(Stock, d.stock_id).ticker if d.stock_id else f"#{d.stock_id}"
+            ticker = stock.ticker
             per_share = valuation.get("intrinsic_value_per_share")
             print(f"{'[apply] ' if args.apply else '[dry-run] '}"
                   f"{ticker} {os.path.basename(d.local_path)}: "
@@ -64,8 +72,9 @@ def main() -> int:
             session.commit()
 
     mode = "（dry-run 预览，未写库）" if not args.apply else ""
+    extra = f"，跳过 {skipped} 条（stock 缺失）" if skipped else ""
     print(f"dcf_report 总数 {len(rows)}，{'已更新' if args.apply else '待更新'} "
-          f"{updated} 条，无变化 {unchanged} 条 {mode}")
+          f"{updated} 条，无变化 {unchanged} 条{extra} {mode}")
     for p in missing:
         print(f"  警告: 报告文件缺失，跳过: {p}", file=sys.stderr)
     return 0
