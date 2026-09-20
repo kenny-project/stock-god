@@ -45,11 +45,14 @@ class Filing(Base):
 
 class Analysis(Base):
     __tablename__ = "analysis"
-    __table_args__ = (UniqueConstraint("stock_id", "form_type", "fiscal_year", name="uq_analysis"),)
+    # quarter 仅季报有值（如 "2024Q3"），年报为 NULL；SQLite 下 NULL 在唯一索引中互不相等，
+    # 年报幂等由登记器的内存 existing 集合兜底
+    __table_args__ = (UniqueConstraint("stock_id", "form_type", "fiscal_year", "quarter", name="uq_analysis"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     stock_id: Mapped[int] = mapped_column(ForeignKey("stock.id"))
     form_type: Mapped[str] = mapped_column(String(16))
     fiscal_year: Mapped[int] = mapped_column(Integer)
+    quarter: Mapped[str | None] = mapped_column(String(8), default=None)
     local_path: Mapped[str] = mapped_column(String(512))
     metrics: Mapped[dict | None] = mapped_column(JSON, default=None)
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

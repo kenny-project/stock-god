@@ -18,6 +18,20 @@ def test_parse_analysis_metrics():
     assert "市值" not in m              # 解析不到的键缺席，严禁编造
 
 
+def test_parse_analysis_metrics_quarter():
+    """真实 AAPL 10-Q 2024Q3 分析文件——季度正文同样含 财务指标/现金流（YTD 累计） 表。"""
+    with open(os.path.join(FIX, "10-Q_2024Q3.md"), encoding="utf-8") as f:
+        text = f.read()
+    m = parse_analysis_metrics(text)
+    assert m["营收"] == 85777            # $85,777M（单季度）
+    assert m["净利润"] == 21448          # $21,448M
+    assert m["每股收益"] == 1.40
+    # "现金流（YTD 累计）" 小节以 前缀匹配 命中
+    assert m["经营现金流"] == 91443
+    assert m["资本支出"] == -6539        # ($6,539M)
+    assert m["自由现金流"] == 84904
+
+
 def test_to_number_signs_and_formats():
     # _NUM 必须保留负号
     assert _to_number("-812") == -812.0

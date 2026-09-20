@@ -74,7 +74,7 @@
       <div class="item-list">
         <div v-for="a in analyses" :key="a.id" class="item clickable"
              :class="{ active: activeAnalysisId === a.id }" @click="loadAnalysis(a)">
-          {{ a.form_type }} FY{{ a.fiscal_year }}
+          {{ a.form_type }} {{ a.quarter || 'FY' + a.fiscal_year }}
           <span class="muted">{{ fmt(a.generated_at) }}</span>
         </div>
         <p v-if="!analyses.length" class="empty">暂无分析报告，请先下载财报并生成分析</p>
@@ -163,7 +163,8 @@ function showToast(text, type = 'success') {
 }
 
 function buildMetricsSeries(list) {
-  const withMetrics = list.filter((a) => a.metrics)
+  // 图表只取年报口径（quarter 为空，含 10-K/20-F），季度数据不混入趋势
+  const withMetrics = list.filter((a) => a.metrics && !a.quarter)
   metricsSeries.value = ['营收', '净利润'].map((key) => ({
     name: key,
     years: withMetrics.map((a) => 'FY' + a.fiscal_year),

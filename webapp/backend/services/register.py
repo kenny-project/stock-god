@@ -11,6 +11,8 @@ from services.metrics import parse_analysis_metrics, parse_dcf_valuation
 _PERIOD = re.compile(r"[-_](\d{8})$")
 _FORM = re.compile(r"(10-?K|10-?Q|20-?F|6-?K)", re.I)
 _FY = re.compile(r"FY(\d{4})", re.I)
+# 季报文件名形如 10-Q_2024Q3.md；fiscal_year 直接取季度标签里的年份
+_QTR = re.compile(r"(\d{4})Q([1-4])", re.I)
 _MAIN_EXT = {".htm", ".html", ".pdf"}
 
 
@@ -101,29 +103,35 @@ def register_analysis(session, stock, base_dir: str | None = None) -> int:
     base = base_dir or os.path.join(ROOT, "reports", "sec_analysis", stock.ticker)
     if not os.path.isdir(base):
         return 0
-    existing = {(a.form_type, a.fiscal_year)
+    existing = {(a.form_type, a.fiscal_year, a.quarter)
                 for a in session.scalars(select(Analysis).where(Analysis.stock_id == stock.id))}
     n = 0
     for name in sorted(os.listdir(base)):
         if not name.endswith(".md"):
             continue
         form = _form_of(name)
-        fy = _FY.search(name)
         if form is None:
             continue  # 文件名无申报类型（如 {TICKER}_analysis_*.md 旧汇总），跳过不造假
-        if fy is None:
-            # 真实 10-Q 分析文件名形如 10-Q_2022Q1.md（无 FY 年份），显式告警后跳过，不静默丢弃
-            print(f"[register] skip {name}: no fiscal year in filename", file=sys.stderr)
+        fy = _FY.search(name)
+        quarter = None
+        if fy is not None:
+            year = int(fy.group(1))  # 年报文件名形如 10-K_FY2024.md，逻辑不变
+        elif (qm := _QTR.search(name)):
+            # 季报文件名形如 10-Q_2024Q3.md：quarter="2024Q3"，fiscal_year 取季度标签年份
+            year = int(qm.group(1))
+            quarter = f"{qm.group(1)}Q{qm.group(2)}"
+        else:
+            # form token 有、FY/季度标签都没有 → 显式告警后跳过，不静默丢弃
+            print(f"[register] skip {name}: no fiscal year/quarter in filename", file=sys.stderr)
             continue
-        year = int(fy.group(1))
         full = os.path.join(base, name)
-        if not _valid_file(full) or (form, year) in existing:
+        if not _valid_file(full) or (form, year, quarter) in existing:
             continue
         with open(full, encoding="utf-8") as f:
             metrics = parse_analysis_metrics(f.read())
-        session.add(Analysis(stock_id=stock.id, form_type=form, fiscal_year=year,
+        session.add(Analysis(stock_id=stock.id, form_type=form, fiscal_year=year, quarter=quarter,
                              local_path=_rel(full), metrics=metrics or None))
-        existing.add((form, year))
+        existing.add((form, year, quarter))
         n += 1
     session.commit()
     return n

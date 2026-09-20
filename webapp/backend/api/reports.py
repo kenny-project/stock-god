@@ -37,8 +37,9 @@ def _get_stock(db: Session, ticker: str) -> Stock:
 @router.get("/stocks/{ticker}/analyses", response_model=list[AnalysisOut])
 def list_analyses(ticker: str, db: Session = Depends(get_db)):
     st = _get_stock(db, ticker)
+    # 同财年再加 quarter 次序（SQLite DESC 下 NULL 年报排在同财年季报之后）
     return db.scalars(select(Analysis).where(Analysis.stock_id == st.id)
-                      .order_by(Analysis.fiscal_year.desc())).all()
+                      .order_by(Analysis.fiscal_year.desc(), Analysis.quarter.desc())).all()
 
 
 @router.get("/stocks/{ticker}/analyses/{analysis_id}")

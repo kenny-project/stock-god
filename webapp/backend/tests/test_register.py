@@ -108,23 +108,28 @@ def test_register_download_idempotent():
 
 
 def test_register_analysis_from_fixture(tmp_path, capsys):
-    """10-K_FY2024.md → (10-K, 2024)；10-Q_2022Q1.md 有 form 无 FY → 显式告警跳过，不静默丢弃。"""
+    """10-K_FY2024.md → (10-K, 2024, quarter=NULL)；真实 10-Q_2024Q3.md → (10-Q, 2024, "2024Q3")，
+    两者同财年可共存；无 FY/季度标签的文件名显式告警跳过，不静默丢弃。"""
     s = _session()
     st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
     base = tmp_path / "reports" / "sec_analysis" / "NKE"
     base.mkdir(parents=True)
     shutil.copy(os.path.join(FIXTURES, "10-K_FY2024.md"), base / "10-K_FY2024.md")
-    # 10-Q 分析文件名形如 10-Q_2022Q1.md（无 FY 年份），内容无关，仅测文件名规则
-    (base / "10-Q_2022Q1.md").write_text("# NKE 10-Q 2022Q1\n", encoding="utf-8")
+    shutil.copy(os.path.join(FIXTURES, "10-Q_2024Q3.md"), base / "10-Q_2024Q3.md")
+    # form token 有、FY/季度标签都没有 → 告警跳过
+    (base / "10-K_draft.md").write_text("# NKE 10-K draft\n", encoding="utf-8")
     n1 = register_analysis(s, st, base_dir=str(base))
-    assert n1 == 1
-    a = s.scalar(select(Analysis))
-    assert a.form_type == "10-K" and a.fiscal_year == 2024
-    assert a.metrics["净利润"] == 5700
+    assert n1 == 2
+    rows = {a.form_type: a for a in s.scalars(select(Analysis)).all()}
+    assert rows["10-K"].fiscal_year == 2024 and rows["10-K"].quarter is None
+    assert rows["10-Q"].fiscal_year == 2024 and rows["10-Q"].quarter == "2024Q3"
+    # 季度报告正文同样含 财务指标/现金流 表，metrics 必须解析出来
+    assert rows["10-Q"].metrics["净利润"] == 21448
+    assert rows["10-Q"].metrics["营收"] == 85777
     n2 = register_analysis(s, st, base_dir=str(base))
-    assert n2 == 0  # 二次登记不重复
+    assert n2 == 0  # 二次登记不重复（含季度行）
     err = capsys.readouterr().err
-    assert "10-Q_2022Q1.md" in err and "no fiscal year" in err
+    assert "10-K_draft.md" in err and "no fiscal year/quarter" in err
 
 
 def test_register_dcf_from_fixture(tmp_path):
