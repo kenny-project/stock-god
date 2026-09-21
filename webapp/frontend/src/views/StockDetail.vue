@@ -354,7 +354,7 @@ async function submit(type, params) {
 }
 
 // 弹窗默认参数（与后端 dcf.py 默认一致）：增长率 8%、折现率 10%、年限 5、安全边际 30%
-const DCF_DEFAULTS = { growth: 8, discount: 10, years: 5, safety: 30 }
+const DCF_DEFAULTS = { growth: 8, discount: 10, years: 10, safety: 30 }
 function openDcf() {
   Object.assign(dcfForm, DCF_DEFAULTS)
   dcfModal.value = true
