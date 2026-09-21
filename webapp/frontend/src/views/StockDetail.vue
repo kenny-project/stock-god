@@ -86,6 +86,8 @@
           <div v-for="a in analyses" :key="a.id" class="item clickable"
                :class="{ active: activeAnalysisId === a.id }" @click="loadAnalysis(a)">
             {{ a.form_type }} {{ a.quarter || 'FY' + a.fiscal_year }}
+            <span v-if="isStale(a.generator_version, 'analysis')" class="stale-badge"
+                  title="旧版生成器数据，建议重新生成">旧版</span>
             <span class="muted">{{ a.period }}</span>
           </div>
           <p v-if="!analyses.length" class="empty">暂无分析报告，请先下载财报并生成分析</p>
@@ -112,6 +114,8 @@
         <div v-for="d in dcfList" :key="d.id" class="item clickable"
              :class="{ active: activeDcfId === d.id }" @click="loadDcf(d)">
           {{ fmt(d.generated_at) }}
+          <span v-if="isStale(d.generator_version, 'dcf')" class="stale-badge"
+                title="旧版生成器数据，建议重新生成">旧版</span>
           <span v-if="d.growth != null || d.discount != null" class="muted">
             （增长{{ d.growth }}% / 折现{{ d.discount }}%）
           </span>
@@ -153,6 +157,7 @@ const activeAnalysisId = ref(null), activeDcfId = ref(null)
 const viewMode = ref('list') // 分析 Tab 页内视图：list=列表，detail=单篇分析正文
 const clearing = ref(false) // 清空分析请求进行中，防连点
 const dcfForm = reactive({ growth: '', discount: '', years: '', safety: '' })
+const curVersions = ref(null) // 当前生成器版本（/api/versions，加载时取一次），用于旧版徽标
 const message = ref(''), messageType = ref('success')
 let toastTimer, pollTimer, seq = 0
 
@@ -184,6 +189,11 @@ const analysisTitle = computed(() => {
   return `${a.form_type} ${a.quarter || 'FY' + a.fiscal_year}${a.period ? ' · ' + a.period : ''}`
 })
 const fmt = (s) => (s ? new Date(s).toLocaleString('zh-CN', { hour12: false }) : '')
+
+// 旧版判断（仅展示提示，不阻断）：无版本号（legacy 旧数据）或 ≠ 当前生成器版本；
+// 版本接口失败时不按版本号误标，但 legacy（无版本号）仍必标
+const isStale = (gv, kind) =>
+  gv == null || (curVersions.value?.[kind] != null && gv !== curVersions.value[kind])
 
 function showToast(text, type = 'success') {
   message.value = text; messageType.value = type
@@ -328,7 +338,11 @@ async function submitDcf() {
   if (ok) dcfModal.value = false
 }
 
-onMounted(loadAll)
+onMounted(() => {
+  loadAll()
+  // 当前生成器版本只需取一次（会话内不变），失败静默——只影响徽标展示
+  api.versions().then((v) => { curVersions.value = v }).catch(() => {})
+})
 watch(() => props.ticker, () => {
   clearInterval(pollTimer)
   pollTimer = null
@@ -367,6 +381,11 @@ onUnmounted(() => { clearInterval(pollTimer); clearTimeout(toastTimer) })
 .detail-title { font-weight: 600; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .muted { color: #666; font-size: 13px; margin-left: 8px; }
+/* 旧版生成器产物徽标：红色小标签，悬停提示建议重新生成 */
+.stale-badge {
+  color: #dc2626; background: #fef2f2; border: 1px solid #dc2626;
+  border-radius: 4px; font-size: 12px; padding: 0 6px; margin-left: 8px; cursor: help;
+}
 .sortable { cursor: pointer; user-select: none; white-space: nowrap; }
 .sortable:hover { color: #2563eb; }
 .sort-mark { margin-left: 2px; color: #2563eb; }
