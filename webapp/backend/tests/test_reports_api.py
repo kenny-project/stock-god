@@ -139,8 +139,15 @@ def test_safe_log_path_rejects_escape():
         os.path.join(ROOT, "logs/tasks/ok.log"))
 
 
-async def test_dcf_list_and_content(env):
+async def test_dcf_list_and_content(env, tmp_path, monkeypatch):
     client, Factory, _ = env
+    # 正文端点从磁盘读文件：用 tmp root 固定文件，
+    # 不依赖真实 reports/ 目录（可能被估值任务/删除操作清理）
+    root = tmp_path / "root"
+    base = root / "reports" / "dcf"
+    base.mkdir(parents=True)
+    (base / "US.NKE_DCF.md").write_text("# NKE DCF 估值分析\n", encoding="utf-8")
+    monkeypatch.setattr("api.reports.ROOT", str(root))
     with Factory() as s:
         from models import Stock, DcfReport
         st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
