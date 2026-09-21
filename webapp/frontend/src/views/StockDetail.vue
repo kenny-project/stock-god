@@ -44,9 +44,9 @@
 
     <div class="tabs">
       <button :class="{ on: tab === 'filings' }" @click="tab = 'filings'">财报</button>
-      <button :class="{ on: tab === 'analysis' }" @click="tab = 'analysis'">财报分析</button>
-      <button :class="{ on: tab === 'charts' }" @click="tab = 'charts'">图表</button>
+      <button :class="{ on: tab === 'financials' }" @click="tab = 'financials'">财报数据</button>
       <button :class="{ on: tab === 'dcf' }" @click="tab = 'dcf'">DCF</button>
+      <button :class="{ on: tab === 'analysis' }" @click="tab = 'analysis'">财报分析</button>
     </div>
 
     <!-- 财报 -->
@@ -102,14 +102,52 @@
       </template>
     </div>
 
-    <!-- 图表 -->
-    <div v-else-if="tab === 'charts'">
-      <TrendChart v-if="hasMetrics" :series="metricsSeries" title="营收/净利润趋势（百万$）" />
-      <p v-else class="empty">暂无分析数据，先生成财报分析</p>
+    <!-- 财报数据 -->
+    <div v-else-if="tab === 'financials'">
+      <template v-if="hasFinData">
+        <table class="fin-table">
+          <thead><tr>
+            <th class="row-label">指标</th>
+            <th v-for="c in fin.columns" :key="c.label" :class="{ qcol: c.kind === 'quarter' }">{{ c.label }}</th>
+          </tr></thead>
+          <tbody>
+            <tr v-for="row in fin.rows" :key="row.key">
+              <td class="row-label">{{ row.label }}</td>
+              <td v-for="c in fin.columns" :key="c.label" :class="{ qcol: c.kind === 'quarter' }">
+                {{ fmtFin(row.values[c.label], row.type) }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <!-- DCF 基期信息：OE 三成分推导 + 股数/现价（单位：亿$，DB 存百万 ÷100） -->
+        <div class="dcf-base">
+          <h3>DCF 基期信息</h3>
+          <template v-if="fin.ttm">
+            <p v-if="fin.ttm.owner_earnings != null" class="oe-line">
+              基期 OE <b>{{ fmtYi(fin.ttm.owner_earnings) }}亿$</b>（{{ fin.ttm.base_period }}）
+              ＝ 净利润 {{ fmtYi(fin.ttm.net_income) }} + 折旧摊销 {{ fmtYi(fin.ttm.depreciation) }}
+              − 维护 CapEx {{ fmtYi(fin.ttm.maintenance_capex) }}（CapEx {{ fmtYi(fin.ttm.capex) }} × 0.6）
+            </p>
+            <p v-else class="oe-line">
+              基期 OE 不可用（{{ fin.ttm.base_period }}）——成分缺失，不编造
+            </p>
+            <p class="muted">{{ fin.ttm.components }}</p>
+          </template>
+          <p v-else class="empty">TTM 基期不可用（缺年报数据）</p>
+          <p class="oe-line">
+            流通股数 {{ fin.shares_outstanding != null ? fmtNum(fin.shares_outstanding) + 'M' : '-' }}
+            <span class="muted">·</span>
+            现价 {{ fin.price != null ? '$' + fin.price : '-' }}
+          </p>
+        </div>
+        <TrendChart v-if="hasMetrics" :series="metricsSeries" title="营收/净利润趋势（百万$）" />
+      </template>
+      <p v-else-if="finLoading" class="empty">加载中…</p>
+      <p v-else class="empty">暂无分析数据，请先生成财报分析</p>
     </div>
 
     <!-- DCF -->
-    <div v-else>
+    <div v-else-if="tab === 'dcf'">
       <div class="item-list">
         <div v-for="d in dcfList" :key="d.id" class="item clickable"
              :class="{ active: activeDcfId === d.id }" @click="loadDcf(d)">
@@ -153,6 +191,8 @@ const taskStore = useTaskStore()
 
 const detail = ref(null), analyses = ref([]), dcfList = ref([])
 const metricsSeries = ref([]) // Task 14 图表数据：[{ name:'营收', years:[...], values:[...] }, ...]
+const fin = ref(null) // 财报数据 Tab：/financials 接口（columns/rows/ttm/shares/price）
+const finLoading = ref(false)
 const tab = ref('filings'), dcfModal = ref(false) // dcfModal：DCF 参数弹窗开关
 const aliasEditing = ref(false), aliasInput = ref('')
 const analysisMd = ref(''), dcfMd = ref('')
@@ -186,6 +226,20 @@ const sortedFilings = computed(() => {
 })
 // metricsSeries 恒含两条序列（构造函数 map 产出），需按真实数据有无判断空态
 const hasMetrics = computed(() => metricsSeries.value.some((s) => s.values.some((v) => v != null)))
+// 财报数据 Tab 有无数据：columns 为空即无分析记录 → 空态提示先生成分析
+const hasFinData = computed(() => !!fin.value && fin.value.columns.length > 0)
+// 金额（百万$）→ 亿$，一位小数千分位
+const fmtYi = (v) => (v == null ? '-' : (v / 100).toLocaleString('zh-CN', { minimumFractionDigits: 1, maximumFractionDigits: 1 }))
+// 通用数字：一位小数千分位（股数等）
+const fmtNum = (v) => (v == null ? '-' : v.toLocaleString('zh-CN', { minimumFractionDigits: 1, maximumFractionDigits: 1 }))
+// 表格单元格：money_yi 已是亿$、ratio 带百分号、eps 带 $；缺数据显示 -（不编造）
+function fmtFin(v, type) {
+  if (v == null) return '-'
+  if (type === 'money_yi') return fmtYi(v)
+  if (type === 'ratio') return `${v}%`
+  if (type === 'eps') return `$${v}`
+  return v
+}
 // 详情页标题：form_type + 季度/财年 + 报告期
 const analysisTitle = computed(() => {
   const a = analyses.value.find((x) => x.id === activeAnalysisId.value)
@@ -217,6 +271,7 @@ function buildMetricsSeries(list) {
 
 async function loadAll() {
   const my = ++seq
+  finLoading.value = true
   try {
     const [stock, aList, dList] = await Promise.all([
       api.stock(props.ticker), api.analyses(props.ticker), api.dcf(props.ticker),
@@ -243,7 +298,14 @@ async function loadAll() {
     if (dList.length) loadDcf(dList.find((d) => d.valuation) || dList[0])
   } catch (e) {
     if (my === seq) showToast('加载失败', 'error')
+  } finally {
+    if (my === seq) finLoading.value = false
   }
+  // 财报数据独立请求：失败只降级该 Tab（空态提示），不拖累详情页其余数据
+  try {
+    const finData = await api.financials(props.ticker)
+    if (my === seq) fin.value = finData
+  } catch { /* financials 失败静默：Tab 显示空态 */ }
 }
 
 async function loadAnalysis(a) {
@@ -428,6 +490,22 @@ onUnmounted(() => { clearInterval(pollTimer); clearTimeout(toastTimer) })
 .sortable { cursor: pointer; user-select: none; white-space: nowrap; }
 .sortable:hover { color: #2563eb; }
 .sort-mark { margin-left: 2px; color: #2563eb; }
+/* 财报数据 Tab：指标表（行=指标，列=报告期）；季度列浅色底与年报列区分 */
+.fin-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.fin-table th, .fin-table td {
+  border-bottom: 1px solid #eee; padding: 6px 10px;
+  text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.fin-table th { border-bottom: 2px solid #ddd; }
+.fin-table .row-label { text-align: left; font-weight: 600; color: #444; }
+.fin-table .qcol { background: #f6f8fa; }
+/* DCF 基期信息段 */
+.dcf-base {
+  border: 1px solid #e5e7eb; border-radius: 8px;
+  padding: 12px 16px; margin: 16px 0 4px; background: #fafafa;
+}
+.dcf-base h3 { margin: 0 0 8px; font-size: 14px; }
+.dcf-base .oe-line { margin: 4px 0; font-size: 14px; }
 .empty { color: #999; text-align: center; padding: 24px 0; }
 .toast {
   position: fixed; top: 16px; left: 50%; transform: translateX(-50%);

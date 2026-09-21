@@ -18,6 +18,7 @@ export const api = {
     req(`/api/stocks/${ticker}/aliases`, { method: 'POST', body: JSON.stringify({ aliases }) }),
   stock: (t) => req(`/api/stocks/${t}`),
   analyses: (t) => req(`/api/stocks/${t}/analyses`),
+  financials: (t) => req(`/api/stocks/${t}/financials`),
   analysis: (t, id) => req(`/api/stocks/${t}/analyses/${id}`),
   clearAnalyses: (t) => req(`/api/stocks/${t}/analyses`, { method: 'DELETE' }),
   dcf: (t) => req(`/api/stocks/${t}/dcf`),

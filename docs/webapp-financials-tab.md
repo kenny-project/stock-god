@@ -68,10 +68,10 @@
 
 ## 4. 任务清单
 
-- [ ] 后端 services/ttm.py：从 DB analysis 记录计算 TTM 基期（含 components 推导串），单测
-- [ ] 后端 GET /api/stocks/{ticker}/financials（columns/rows/ttm/shares/price），单测
-- [ ] 前端 Tab 重排 + 图表 Tab 移除、TrendChart 移入财报数据 Tab
-- [ ] 前端 财报数据 Tab：基础信息表（12 行 × 年报+四季列）、DCF 基础信息段、空态
+- [x] 后端 services/ttm.py：从 DB analysis 记录计算 TTM 基期（含 components 推导串），单测
+- [x] 后端 GET /api/stocks/{ticker}/financials（columns/rows/ttm/shares/price），单测
+- [x] 前端 Tab 重排 + 图表 Tab 移除、TrendChart 移入财报数据 Tab
+- [x] 前端 财报数据 Tab：基础信息表（12 行 × 年报+四季列）、DCF 基础信息段、空态
 - [ ] 评审闭环（spec 合规 + 代码质量）
 - [ ] 重启服务并通知验收
 

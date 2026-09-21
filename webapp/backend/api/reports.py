@@ -8,6 +8,8 @@ from db import ROOT
 from deps import get_db
 from models import Analysis, DcfReport, Filing, Stock, Task
 from schemas import AnalysisOut, DcfOut
+from services.quote import get_price
+from services.ttm import compute_ttm
 
 router = APIRouter(prefix="/api", tags=["reports"])
 
@@ -86,6 +88,76 @@ def clear_analyses(ticker: str, db: Session = Depends(get_db)):
     db.execute(delete(Analysis).where(Analysis.stock_id == st.id))
     db.commit()
     return {"deleted": len(analyses)}
+
+
+# 财报数据 Tab 指标行：固定 12 行顺序（key, 展示名, 类型, metrics 中文键）；
+# money_yi = DB 百万值 ÷100 展示为亿，ratio/eps 原值。缺数据置 null，不编造。
+_FIN_ROWS = (
+    ("revenue", "营收（亿$）", "money_yi", "营收"),
+    ("net_income", "净利润（亿$）", "money_yi", "净利润"),
+    ("net_margin", "净利率（%）", "ratio", "净利率"),
+    ("gross_profit", "毛利润（亿$）", "money_yi", "毛利润"),
+    ("gross_margin", "毛利率（%）", "ratio", "毛利率"),
+    ("eps", "每股收益（$）", "eps", "每股收益"),
+    ("cash", "现金及等价物（亿$）", "money_yi", "现金及等价物"),
+    ("fcf", "自由现金流（亿$）", "money_yi", "自由现金流"),
+    ("total_assets", "总资产（亿$）", "money_yi", "总资产"),
+    ("total_liabilities", "总负债（亿$）", "money_yi", "总负债"),
+    ("debt_ratio", "资产负债率（%）", "ratio", "资产负债率"),
+    ("roe", "净资产收益率（%）", "ratio", "净资产收益率"),
+)
+_QUARTER_COLUMNS = 4  # 最近季度列数
+
+
+@router.get("/stocks/{ticker}/financials")
+def financials(ticker: str, db: Session = Depends(get_db)):
+    """财报数据 Tab：基础信息表（年报全量 + 最近 4 季）+ TTM 基期 + 股数/现价。
+
+    现价取腾讯行情，任何异常降级为 null，不阻塞本接口（行情仅展示）。
+    """
+    st = _get_stock(db, ticker)
+    analyses = db.scalars(select(Analysis).where(Analysis.stock_id == st.id)).all()
+    annuals = sorted((a for a in analyses if a.quarter is None),
+                     key=lambda a: a.fiscal_year, reverse=True)
+    quarters = sorted((a for a in analyses if a.quarter is not None),
+                      key=lambda a: (a.fiscal_year, a.quarter or ""), reverse=True)
+    columns = ([{"kind": "annual", "label": f"FY{a.fiscal_year}", "analysis_id": a.id}
+                for a in annuals]
+               + [{"kind": "quarter", "label": a.quarter, "analysis_id": a.id}
+                  for a in quarters[:_QUARTER_COLUMNS]])
+    by_id = {a.id: a for a in analyses}
+    rows = []
+    for key, label, typ, metric_key in _FIN_ROWS:
+        values = {}
+        for c in columns:
+            v = (by_id[c["analysis_id"]].metrics or {}).get(metric_key)
+            if v is None:
+                values[c["label"]] = None
+            elif typ == "money_yi":
+                values[c["label"]] = round(v / 100, 1)
+            else:
+                values[c["label"]] = v
+        rows.append({"key": key, "label": label, "type": typ, "values": values})
+    # TTM 基期：最新年报 + 年后季报（公式与 scripts/dcf.py compute_ttm 同一套，
+    # 实现在 services/ttm.py；无年报数据返回 None）
+    latest_annual = annuals[0] if annuals else None
+    ttm = compute_ttm(
+        {"fiscal_year": latest_annual.fiscal_year,
+         "metrics": latest_annual.metrics or {}} if latest_annual else None,
+        [{"fiscal_year": a.fiscal_year, "quarter": a.quarter,
+          "form_type": a.form_type, "metrics": a.metrics or {}} for a in quarters])
+    # 股数：最近一期（年报+季报一起取最新）metrics 的流通股数
+    shares = None
+    for a in sorted(analyses, key=lambda x: (x.fiscal_year, x.quarter or ""), reverse=True):
+        if a.metrics and a.metrics.get("流通股数") is not None:
+            shares = a.metrics["流通股数"]
+            break
+    try:
+        price = get_price(st.symbol())
+    except Exception:
+        price = None  # 双保险：行情异常只降级，不阻塞接口
+    return {"columns": columns, "rows": rows, "ttm": ttm,
+            "shares_outstanding": shares, "price": price}
 
 
 @router.get("/stocks/{ticker}/analyses/{analysis_id}")
