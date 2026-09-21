@@ -323,3 +323,45 @@ async def test_versions_endpoint(client):
         assert r.status_code == 200
         assert r.json() == {"analysis": scripts_dv.ANALYSIS_VERSION,
                             "dcf": scripts_dv.DCF_VERSION}
+
+
+async def test_clear_tasks_deletes_terminal_only(client, tmp_path, monkeypatch):
+    """清空任务：只删终态行（success/failed/cancelled）+ logs/tasks/ 白名单内的日志文件；
+    排队/运行中任务保留，白名单外日志文件不动（safe_log_path 守卫语义）。"""
+    # safe_log_path 的守卫读 api.reports.ROOT：patch 到 tmp root 构造真实日志文件
+    root = tmp_path / "root"
+    log_dir = root / "logs" / "tasks"
+    log_dir.mkdir(parents=True)
+    (root / "logs" / "other").mkdir(parents=True)
+    monkeypatch.setattr("api.reports.ROOT", str(root))
+    with _factory() as s:
+        from models import Task
+        s.add_all([
+            Task(task_type="download", status="success", log_path="logs/tasks/task_1.log"),
+            Task(task_type="analysis", status="failed", log_path="logs/tasks/task_2.log"),
+            Task(task_type="dcf", status="cancelled", log_path="logs/tasks/task_3.log"),
+            Task(task_type="dcf", status="failed", log_path="logs/other/evil.log"),  # 越界日志
+            Task(task_type="dcf", status="failed", log_path=None),                   # 无日志
+            Task(task_type="dcf", status="pending"),
+            Task(task_type="dcf", status="running"),
+        ])
+        s.commit()
+    ok_logs = [log_dir / f"task_{i}.log" for i in (1, 2, 3)]
+    for p in ok_logs:
+        p.write_text("log", encoding="utf-8")
+    evil = root / "logs" / "other" / "evil.log"
+    evil.write_text("x", encoding="utf-8")
+
+    async with client as c:
+        r = await c.delete("/api/tasks")
+        assert r.status_code == 200 and r.json() == {"deleted": 5}
+        # 幂等：再删一次为 0
+        assert (await c.delete("/api/tasks")).json() == {"deleted": 0}
+
+    for p in ok_logs:
+        assert not p.exists()
+    assert evil.exists()  # 白名单外文件不删
+    with _factory() as s:
+        from models import Task
+        left = [t.status for t in s.query(Task).all()]
+        assert sorted(left) == ["pending", "running"]

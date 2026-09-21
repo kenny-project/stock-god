@@ -33,7 +33,15 @@
       <div v-if="!visibleTasks.length" class="ts-empty">暂无任务</div>
     </div>
     <div class="ts-foot">
-      <router-link to="/tasks">全部任务 →</router-link>
+      <button class="ts-link" :disabled="clearing" @click="clearAll">清空</button>
+      <button class="ts-link" @click="tasksModal = true">全部任务 →</button>
+    </div>
+    <!-- 全部任务弹窗（不跳转路由，/tasks 页仍保留兼容书签直链） -->
+    <div v-if="tasksModal" class="modal-mask" @click.self="tasksModal = false">
+      <div class="modal-card">
+        <button class="modal-close" title="关闭" @click="tasksModal = false">×</button>
+        <TasksPanel />
+      </div>
     </div>
     <div v-if="message" class="toast" :class="messageType">{{ message }}</div>
   </aside>
@@ -49,12 +57,15 @@ import { ref, computed, reactive, onUnmounted } from 'vue'
 import { api } from '../api'
 import { useTaskStore } from '../stores/tasks'
 import LogViewer from './LogViewer.vue'
+import TasksPanel from './TasksPanel.vue'
 
 const COLLAPSED_KEY = 'sg.sidebar.collapsed'
 
 const taskStore = useTaskStore()
 const collapsed = ref(localStorage.getItem(COLLAPSED_KEY) === '1')
 const expandId = ref(null)
+const tasksModal = ref(false) // 「全部任务」弹窗开关
+const clearing = ref(false) // 清空请求进行中，防连点
 const message = ref(''), messageType = ref('success')
 let toastTimer
 
@@ -96,6 +107,21 @@ function showToast(text, type = 'success') {
 }
 
 const cancelling = reactive(new Set()) // 取消请求 in-flight 的任务 id，防止连发重复 cancel
+
+// 清空终态任务（后端只删 success/failed/cancelled），成功后刷新共享 store
+async function clearAll() {
+  if (!confirm('清空所有已完成/失败/已取消的任务记录？')) return
+  clearing.value = true
+  try {
+    const r = await api.clearTasks()
+    taskStore.tasks = await api.tasks()
+    showToast(`已清空 ${r.deleted} 条任务记录`)
+  } catch (e) {
+    showToast(`清空失败: ${e.message}`, 'error')
+  } finally {
+    clearing.value = false
+  }
+}
 
 async function cancel(t) {
   if (cancelling.has(t.id)) return
@@ -140,9 +166,31 @@ onUnmounted(() => clearTimeout(toastTimer))
 }
 .ts-empty { color: #999; text-align: center; padding: 24px 0; font-size: 13px; }
 .ts-foot {
+  display: flex; align-items: center; justify-content: space-between;
   padding: 10px 12px; border-top: 1px solid #eee;
 }
-.ts-foot a { color: #0366d6; text-decoration: none; font-size: 13px; }
+.ts-link {
+  border: none; background: none; color: #0366d6; cursor: pointer;
+  font-size: 13px; padding: 0;
+}
+.ts-link:hover { text-decoration: underline; }
+.ts-link:disabled { opacity: .5; cursor: not-allowed; text-decoration: none; }
+/* 全部任务弹窗：遮罩盖全屏（z-index 100，低于 toast 的 1000），点遮罩空白处关闭 */
+.modal-mask {
+  position: fixed; inset: 0; z-index: 100; background: rgba(0, 0, 0, .45);
+  display: flex; align-items: center; justify-content: center;
+}
+.modal-card {
+  position: relative; width: 720px; max-width: 90vw; max-height: 80vh;
+  overflow-y: auto; background: #fff;
+  border-radius: 8px; padding: 16px 20px; box-shadow: 0 8px 32px rgba(0, 0, 0, .2);
+}
+.modal-close {
+  position: absolute; top: 8px; right: 10px;
+  border: none; background: none; font-size: 20px; line-height: 1;
+  color: #666; cursor: pointer; padding: 2px 6px;
+}
+.modal-close:hover { color: #dc2626; }
 .toast {
   position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
   z-index: 1000; padding: 10px 20px; border-radius: 6px;

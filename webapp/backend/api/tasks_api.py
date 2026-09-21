@@ -1,4 +1,5 @@
 import asyncio
+import os
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -7,6 +8,7 @@ from deps import get_db
 from models import Stock, Task
 from schemas import TaskCreate, TaskOut
 from executor import TaskExecutor
+from api.reports import safe_log_path
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 _executor: TaskExecutor | None = None
@@ -59,6 +61,26 @@ def list_tasks(status: str = "", db: Session = Depends(get_db)):
     if status:
         stmt = stmt.where(Task.status == status)
     return [TaskOut.model_validate(t) for t in db.scalars(stmt).all()]
+
+
+TERMINAL_STATUSES = ("success", "failed", "cancelled")
+
+
+@router.delete("")
+def clear_tasks(db: Session = Depends(get_db)):
+    """清空终态任务（success/failed/cancelled）：删行 + 删日志文件（仅限 logs/tasks/ 内，
+    守卫复用 reports.safe_log_path 的 realpath 白名单语义）。排队/运行中的任务不动。"""
+    tasks = db.scalars(select(Task).where(Task.status.in_(TERMINAL_STATUSES))).all()
+    for t in tasks:
+        path = safe_log_path(t.log_path)
+        if path and os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass  # 单个日志文件删不掉不阻塞删行
+        db.delete(t)
+    db.commit()
+    return {"deleted": len(tasks)}
 
 
 @router.get("/{task_id}", response_model=TaskOut)

@@ -30,5 +30,6 @@ export const api = {
   createTask: (task_type, ticker, params = {}) =>
     req('/api/tasks', { method: 'POST', body: JSON.stringify({ task_type, ticker, params }) }),
   cancelTask: (id) => req(`/api/tasks/${id}/cancel`, { method: 'POST' }),
+  clearTasks: () => req('/api/tasks', { method: 'DELETE' }),
   syncStocks: () => req('/api/stocks/sync', { method: 'POST' }),
 }

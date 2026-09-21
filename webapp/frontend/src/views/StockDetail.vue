@@ -82,7 +82,7 @@
     <!-- 财报分析 -->
     <div v-else-if="tab === 'analysis'">
       <template v-if="viewMode === 'list'">
-        <div class="item-list">
+        <div class="item-list analysis-list">
           <div v-for="a in analyses" :key="a.id" class="item clickable"
                :class="{ active: activeAnalysisId === a.id }" @click="loadAnalysis(a)">
             {{ a.form_type }} {{ a.quarter || 'FY' + a.fiscal_year }}
@@ -230,10 +230,14 @@ async function loadAll() {
       analysisMd.value = ''
       activeAnalysisId.value = null
       viewMode.value = 'list'
+      // 默认选中第一条（最新）分析并直接进入正文视图；列表仅在后退时可见（限高滚动）
+      if (aList.length) await loadAnalysis(aList[0])
     }
+    buildMetricsSeries(aList)
     dcfMd.value = ''
     activeDcfId.value = null
-    buildMetricsSeries(aList)
+    // DCF 默认选中第一条有估值的报告（都没有则第一条），自动加载正文与图表
+    if (dList.length) loadDcf(dList.find((d) => d.valuation) || dList[0])
   } catch (e) {
     if (my === seq) showToast('加载失败', 'error')
   }
@@ -398,6 +402,8 @@ onUnmounted(() => { clearInterval(pollTimer); clearTimeout(toastTimer) })
 .modal-body input { width: 90px; padding: 4px 8px; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 .item-list { padding: 8px 0; }
+/* 分析列表态：限高约 5 行，超出滚动（默认直接进 detail 视图，列表仅后退时可见） */
+.analysis-list { max-height: 200px; overflow-y: auto; }
 .item { padding: 8px 12px; border-bottom: 1px solid #eee; }
 .item.active { color: #0366d6; background: #f6f8fa; }
 .detail-toolbar { display: flex; align-items: center; gap: 12px; padding: 8px 0 12px; }
