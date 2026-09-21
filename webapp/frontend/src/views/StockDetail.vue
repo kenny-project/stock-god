@@ -234,6 +234,9 @@ async function loadAll() {
       if (aList.length) await loadAnalysis(aList[0])
     }
     buildMetricsSeries(aList)
+    // 数据刷新不踢出已选中的 DCF 报告：与分析 Tab 同款守卫，
+    // 任务完成轮询触发 loadAll 时保持用户手动选中的第 N 条（正文与图表不动）
+    if (dList.some((d) => d.id === activeDcfId.value)) return
     dcfMd.value = ''
     activeDcfId.value = null
     // DCF 默认选中第一条有估值的报告（都没有则第一条），自动加载正文与图表

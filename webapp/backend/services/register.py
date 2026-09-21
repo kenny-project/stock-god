@@ -16,6 +16,18 @@ _FY = re.compile(r"FY(\d{4})", re.I)
 # fiscal_year 直接取季度标签里的年份；匹配顺序必须先于 _FY（见 register_analysis）
 _QTR = re.compile(r"(\d{4})Q([1-4])", re.I)
 _MAIN_EXT = {".htm", ".html", ".pdf"}
+# 主文档判定时排除 exhibit 及其 EDGAR 常见缩写：
+# - 字面 exhibit；exh101 / exh_99（exhibit→exh 后跟编号或下划线）；
+#   xex991（EDGAR 以 x 作 exhibit 分隔的命名，如 abcxex991.htm）；
+#   ex10 / ex99 系列（exhibit 编号，要求边界前缀，如 -ex10_1、_ex99）。
+# 缩写均要求前缀边界（行首或 -/_/. 分隔符），避免误伤正常主文档名
+# （如 nke-20220531.htm、msft-10k_20220630.htm）中的普通字母组合。
+_EXHIBIT_ABBR = re.compile(
+    r"exhibit"
+    r"|(?:^|[-_.])exh(?:\d|_)"
+    r"|xex\d"
+    r"|(?:^|[-_.])ex\d",
+    re.I)
 
 
 def _rel(path: str) -> str:
@@ -46,13 +58,13 @@ def _form_of(name: str) -> str | None:
 
 
 def _representative(dirpath: str) -> str | None:
-    """选申报期目录的代表文件：优先主文档（htm/html/pdf 且名字不含 exhibit），
-    无主文档则回退到字母序第一个有效文件。"""
+    """选申报期目录的代表文件：优先主文档（htm/html/pdf 且名字不含 exhibit
+    及其缩写 exh/xex/ex10 系列），无主文档则回退到字母序第一个有效文件。"""
     files = [x for x in sorted(os.listdir(dirpath)) if _valid_file(os.path.join(dirpath, x))]
     if not files:
         return None
     main = [x for x in files
-            if os.path.splitext(x)[1].lower() in _MAIN_EXT and "exhibit" not in x.lower()]
+            if os.path.splitext(x)[1].lower() in _MAIN_EXT and not _EXHIBIT_ABBR.search(x)]
     return os.path.join(dirpath, main[0] if main else files[0])
 
 
@@ -63,8 +75,9 @@ def register_download(session, stock, base_dir: str | None = None) -> int:
     两遍扫描：顶层文件（EDGAR 主文档，如 nke-20220531.htm）先于同名申报期目录登记，
     让主文档占据 (form_type, period) 槽位，目录里的 exhibit/XBRL 附件不会挤掉它。
 
-    form 类型来源：目录用代表文件名提取（如 pfe-exh101x3292026x10q.htm 含 10q），
+    form 类型来源：目录用代表文件名提取（如目录内主文档 msft-10k_20220630.htm 含 10k），
     提取不到再回退目录名，仍提取不到才 UNKNOWN；顶层文件名即代表文件名。
+    （代表文件本身已排除 exhibit/exh/xex/ex10 系列附件，见 _representative。）
     兜底查重：某申报期已有任何已知类型（非 UNKNOWN）行时不再登记 UNKNOWN 行，
     杜绝同一 (stock, period) 出现 10-Q + UNKNOWN 成对重复。
     """

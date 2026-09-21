@@ -67,6 +67,29 @@ def test_register_download_dir_form_from_representative_filename(tmp_path):
     assert n == 1
 
 
+def test_register_download_dir_representative_skips_exh(tmp_path):
+    """无顶层主文档的目录：exh/xex/ex10 缩写 exhibit 不得被选为代表文件，
+    应跳过它们选中真正主文档，并从代表文件名（而非目录名）提取 form token。
+    修复前 abc-exh101_*.htm 会被误登记为主文档（form=UNKNOWN，带错 token 风险）。"""
+    s = _session()
+    st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+    base = tmp_path / "reports" / "sec_filings" / "NKE"
+    d = base / "abc-20240331"  # 目录名无 form token
+    d.mkdir(parents=True)
+    # 字母序 exhibit 附件排在主文档之前，保证修复前会被误选为代表文件
+    (d / "abc-exh101_20240331.htm").write_bytes(b"<html>exhibit 10.1</html>")
+    (d / "abcxex991_20240331.htm").write_bytes(b"<html>exhibit 99.1</html>")
+    (d / "tm247654d1_ex10_20240331.htm").write_bytes(b"<html>exhibit 10</html>")
+    (d / "tm247654d1_10q.htm").write_bytes(b"<html>main doc</html>")
+    n = register_download(s, st, base_dir=str(base))
+    rows = s.scalars(select(Filing)).all()
+    assert n == 1 and len(rows) == 1
+    f = rows[0]
+    assert f.form_type == "10-Q"  # 从代表文件名 tm247654d1_10q.htm 提取
+    assert f.period == "2024-03-31"
+    assert f.local_path.endswith("abc-20240331/tm247654d1_10q.htm")
+
+
 def test_register_download_unknown_blocked_by_known_period(tmp_path):
     """目录名与代表文件名都提取不到 form token，且该申报期已有已知类型行
     （顶层 10-Q 主文档）→ 不再登记 UNKNOWN 行（杜绝成对重复）；
