@@ -283,5 +283,140 @@ class TestLatestCoverShares(unittest.TestCase):
         self.assertEqual(dcf.latest_cover_shares([], []), (None, None))
 
 
+class TestComputeTTMDetail(unittest.TestCase):
+    """compute_ttm 附带推导明细（detail），供报告"基期 Owner Earnings 明细"逐项展示"""
+
+    def test_income_rolling_and_cf_ytd_details(self):
+        """利润表科目记录单季滚动明细；现金流科目（10-Q）记录 YTD 公式成分"""
+        annual = [{"period": "FY2025", "revenue": 5000, "net_income": 800,
+                   "capex": -300, "form": "10-K"}]
+        quarterly = [
+            {"period": "2026Q1", "revenue": 1300, "net_income": 200, "capex": -100, "form": "10-Q"},
+            {"period": "2025Q1", "revenue": 1250, "net_income": 190, "capex": -90, "form": "10-Q"},
+        ]
+        ttm = dcf.compute_ttm(annual, quarterly)
+        self.assertEqual(ttm["net_income"], 810)
+        self.assertEqual(ttm["capex"], -310)
+        detail = ttm["detail"]
+        self.assertEqual(detail["net_income"]["formula"], "rolling")
+        self.assertEqual(detail["net_income"]["annual"], 800)
+        self.assertEqual(detail["net_income"]["components"], [("26Q1", 200, 190)])
+        self.assertEqual(detail["capex"]["formula"], "ytd")
+        self.assertEqual(detail["capex"]["annual"], -300)
+        self.assertEqual(detail["capex"]["after"], -100)
+        self.assertEqual(detail["capex"]["prior"], -90)
+
+    def test_missing_prior_metric_annotated(self):
+        """上年同期缺该科目 → 不输出 TTM，detail 注明缺失位置"""
+        annual = [{"period": "FY2025", "revenue": 5000, "net_income": 800, "form": "10-K"}]
+        quarterly = [
+            {"period": "2026Q1", "revenue": 1300, "net_income": 200, "form": "10-Q"},
+            {"period": "2025Q1", "revenue": 1250, "form": "10-Q"},
+        ]
+        ttm = dcf.compute_ttm(annual, quarterly)
+        self.assertEqual(ttm["revenue"], 5050)
+        self.assertNotIn("net_income", ttm)
+        text = dcf._ttm_derive_text("net_income", ttm["detail"].get("net_income"))
+        self.assertIn("26Q1 上年同期单季缺失", text)
+        self.assertIn("无法滚动", text)
+
+    def test_all_metrics_missing_returns_empty(self):
+        """全部科目都无法构造 → 返回 {}（不输出 base_period/detail，与旧行为一致）"""
+        ttm = dcf.compute_ttm(
+            [{"period": "FY2025", "revenue": 5000, "form": "10-K"}],
+            [{"period": "2026Q1", "revenue": 1300, "form": "10-Q"}])
+        self.assertEqual(ttm, {})
+
+    def test_derive_text_ytd_and_annual_missing(self):
+        """YTD 缺上年同期注明"无法计算"；年报缺科目注明无法构造"""
+        annual = [{"period": "FY2025", "revenue": 5000, "net_income": 800,
+                   "capex": -300, "form": "10-K"}]
+        quarterly = [
+            {"period": "2026Q1", "revenue": 1300, "net_income": 200, "capex": -100, "form": "10-Q"},
+            {"period": "2025Q1", "revenue": 1250, "net_income": 190, "form": "10-Q"},  # 缺 capex
+        ]
+        ttm = dcf.compute_ttm(annual, quarterly)
+        self.assertNotIn("capex", ttm)
+        text = dcf._ttm_derive_text("capex", ttm["detail"].get("capex"))
+        self.assertIn("Q1'26 累计 100", text)
+        self.assertIn("Q1'25 累计", text)
+        self.assertIn("无法计算", text)
+        self.assertIn("最新年报缺该科目", dcf._ttm_derive_text("depreciation", None))
+
+
+class TestBaseOEDetailSection(unittest.TestCase):
+    """报告"基期 Owner Earnings 明细"小节：逐项推导可核对，回退时如实注明"""
+
+    def _oe_data(self):
+        return [{"year": "FY2025", "net_income": 800, "revenue": 5000, "fcf": 700,
+                 "cfo": 900, "depreciation": 200, "capex": -300,
+                 "maintenance_capex": 180.0, "owner_earnings": 820.0}]
+
+    def _params(self, **extra):
+        return {"growth": 0.05, "discount": 0.10, "terminal_growth": 0.03,
+                "years": 5, "currency": "$", **extra}
+
+    def test_ttm_basis_shows_derivation(self):
+        annual = [{"period": "FY2025", "revenue": 5000, "net_income": 800,
+                   "depreciation": 200, "capex": -300, "form": "10-K"}]
+        quarterly = [
+            {"period": "2026Q1", "revenue": 1300, "net_income": 200,
+             "depreciation": 210, "capex": -100, "form": "10-Q"},
+            {"period": "2025Q1", "revenue": 1250, "net_income": 190,
+             "depreciation": 190, "capex": -90, "form": "10-Q"},
+        ]
+        ttm = dcf.compute_ttm(annual, quarterly)
+        base_oe = dcf.calculate_owner_earnings(
+            ttm["net_income"], ttm["depreciation"], abs(ttm["capex"]) * 0.6)
+        dcf_result = dcf.dcf_valuation(base_oe, 0.05, 0.10, 0.03, 5, 1500.0, 20.0)
+        report = dcf.generate_report(
+            "US.TEST", dcf_result, [], self._oe_data(), None,
+            self._params(base_period=f"{ttm['base_period']}（年报+季报滚动）",
+                         base_oe_basis="ttm", shares_millions=1500.0),
+            base_ttm=ttm)
+        self.assertIn("## 基期 Owner Earnings 明细", report)
+        # 利润表科目滚动推导 / 现金流科目 YTD 推导（capex 流出取绝对值展示）
+        self.assertIn("| 净利润（TTM） | 810 | 年报 800 + 26Q1 (200−190) |", report)
+        self.assertIn("| 折旧摊销（TTM） | 220 | YTD 公式：年报 200 + Q1'26 累计 210 − Q1'25 累计 190 |", report)
+        self.assertIn("| CapEx（TTM） | 310 | YTD 公式：年报 300 + Q1'26 累计 100 − Q1'25 累计 90 |", report)
+        self.assertIn("| 维护性 CapEx（×0.6） | 186 | CapEx × 0.6 |", report)
+        self.assertIn(f"| **基期 Owner Earnings** | **{base_oe:,.0f}** | 净利润 + 折旧摊销 − 维护性 CapEx |", report)
+        self.assertIn("| 数据截止期 | TTM 截至 2026Q1 |", report)
+        self.assertIn("| 流通股数 | 1,500.0M |", report)
+
+    def test_annual_fallback_notes_ttm_disabled(self):
+        dcf_result = dcf.dcf_valuation(820, 0.05, 0.10, 0.03, 5, 1500.0, 20.0)
+        report = dcf.generate_report(
+            "US.TEST", dcf_result, [], self._oe_data(), None,
+            self._params(base_period="最新年报的 Owner Earnings", base_oe_basis="annual",
+                         shares_millions=1500.0, shares_note="SEC 封面（2026Q2）"))
+        self.assertIn("未启用 TTM（成分缺失），回退最新年报", report)
+        self.assertIn("| 净利润（FY2025） | 800 | 最新年报 FY2025 |", report)
+        self.assertIn("| CapEx（FY2025） | 300 | 最新年报 FY2025 |", report)
+        self.assertIn("| **基期 Owner Earnings** | **820** | 净利润 + 折旧摊销 − 维护性 CapEx |", report)
+        self.assertIn("1,500.0M · SEC 封面（2026Q2）", report)
+        self.assertIn("| 数据截止期 | 最新年报 FY2025 |", report)
+
+    def test_fcf_fallback_when_dep_or_capex_missing(self):
+        """折旧/CapEx 的 TTM 缺失 → FCF 口径，缺项显示 "-" 并注明"""
+        annual = [{"period": "FY2025", "revenue": 5000, "net_income": 800, "fcf": 700, "form": "10-K"}]
+        quarterly = [
+            {"period": "2026Q1", "revenue": 1300, "net_income": 200, "fcf": 180, "form": "10-Q"},
+            {"period": "2025Q1", "revenue": 1250, "net_income": 190, "fcf": 170, "form": "10-Q"},
+        ]
+        ttm = dcf.compute_ttm(annual, quarterly)
+        self.assertEqual(ttm["fcf"], 710)
+        dcf_result = dcf.dcf_valuation(ttm["fcf"], 0.05, 0.10, 0.03, 5, 1500.0, 20.0)
+        report = dcf.generate_report(
+            "US.TEST", dcf_result, [], self._oe_data(), None,
+            self._params(base_period=f"{ttm['base_period']}（FCF 口径）",
+                         base_oe_basis="ttm_fcf", shares_millions=1500.0),
+            base_ttm=ttm)
+        self.assertIn("| 净利润（TTM） | 810 |", report)
+        self.assertIn("| 折旧摊销（TTM） | - |", report)
+        self.assertIn("| CapEx（TTM） | - |", report)
+        self.assertIn("TTM 自由现金流（FCF 口径）", report)
+
+
 if __name__ == "__main__":
     unittest.main()

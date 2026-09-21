@@ -38,14 +38,22 @@ def _section_lines(text: str, section: str):
             yield line
 
 
-def _table_rows(text: str, section: str) -> list[tuple[str, str]]:
-    """返回指定 `## 小节` 下表格的 (第一列, 第二列) 行。"""
+def _table_rows(text: str, section: str, four_col: bool = False) -> list[tuple[str, str]]:
+    """返回指定 `## 小节` 下表格的 (第一列, 第二列) 行。
+
+    four_col=True 时（新版 DCF 基本信息/计算参数为 4 列：项目|数值|项目|数值
+    两两并排），每行额外拆出 (第三列, 第四列) 一组键值；第 3 列为分隔行或
+    表头（"项目"）时不拆。旧版 2 列表行两种模式行为一致。
+    """
     out = []
     for line in _section_lines(text, section):
         if line.strip().startswith("|"):
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
             if len(cells) >= 2 and set(cells[0]) - {":", "-", " "} and cells[0] not in ("指标", "项目"):
                 out.append((cells[0], cells[1]))
+                if (four_col and len(cells) >= 4
+                        and set(cells[2]) - {":", "-", " "} and cells[2] not in ("指标", "项目")):
+                    out.append((cells[2], cells[3]))
     return out
 
 
@@ -59,7 +67,10 @@ def parse_analysis_metrics(text: str) -> dict:
 
 def parse_dcf_valuation(text: str) -> dict:
     v: dict = {}
-    kv = {k: raw for k, raw in _table_rows(text, "基本信息") + _table_rows(text, "估值结果")}
+    # 新版 DCF 基本信息/计算参数为 4 列（项目|数值 两两并排），four_col 额外拆出
+    # 第 3/4 列键值（如 当前股价→$349.54）；旧版 2 列报告行为不变
+    kv = {k: raw for k, raw in _table_rows(text, "基本信息", four_col=True)
+          + _table_rows(text, "估值结果")}
     if (p := _to_number(kv.get("当前股价", ""))) is not None:
         v["price"] = p
     for k, raw in kv.items():

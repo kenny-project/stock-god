@@ -142,6 +142,8 @@ def read_sec_quarterly(ticker):
 # 现金流量表科目（10-Q 披露的是 YTD 累计，TTM 公式与利润表科目不同）
 _CF_METRICS = ("cfo", "capex", "depreciation", "fcf")
 _TTM_FLOW_METRICS = ("revenue", "net_income", "operating_income") + _CF_METRICS
+# YTD 累计披露的季度 → 人读标签（Q1/H1/9M/FY），如 2026Q2 → "H1'26 累计"
+_YTD_LABEL = {1: "Q1", 2: "H1", 3: "9M", 4: "FY"}
 
 
 def _parse_fyq(period):
@@ -159,7 +161,10 @@ def compute_ttm(annual, quarterly):
       - 现金流科目在 6-K 中为单季值: 与利润表同公式
     任一成分缺失则该指标不输出 TTM（财务数据不可造假），由调用方回退年报基期。
 
-    返回 {metric: ttm_value, "base_period": "TTM 截至 2026Q3"}；无年后季报返回 {}。
+    返回 {metric: ttm_value, "base_period": "TTM 截至 2026Q3",
+          "detail": {metric: 推导明细}}；无年后季报返回 {}。
+    detail 每指标含 formula（rolling=单季滚动 / ytd=YTD 累计）、年报值、
+    各成分值与缺失原因，供报告"基期 Owner Earnings 明细"逐项展示。
     """
     if not annual:
         return {}
@@ -183,6 +188,7 @@ def compute_ttm(annual, quarterly):
         return {}
 
     ttm = {}
+    detail = {}  # 每指标推导明细（供报告展示推导过程）
     for metric in _TTM_FLOW_METRICS:
         a_val = latest.get(metric)
         if a_val is None:
@@ -190,26 +196,48 @@ def compute_ttm(annual, quarterly):
         if metric in _CF_METRICS and all(r.get("form") == "10-Q" for r in after.values()):
             # 10-Q 现金流为 YTD 累计：取期末最新一份与上年同期一份
             q_latest = max(after)
+            after_label = f"{_YTD_LABEL[q_latest]}'{(fy + 1) % 100} 累计"
+            prior_label = f"{_YTD_LABEL[q_latest]}'{fy % 100} 累计"
             prior_rec = prior.get(q_latest)
             if prior_rec is None or prior_rec.get(metric) is None:
+                detail[metric] = {"formula": "ytd", "annual": a_val,
+                                  "after_label": after_label,
+                                  "after": after[q_latest][metric],
+                                  "missing_prior_label": prior_label}
                 continue
             ttm[metric] = a_val + after[q_latest][metric] - prior_rec[metric]
+            detail[metric] = {"formula": "ytd", "annual": a_val,
+                              "after_label": after_label,
+                              "after": after[q_latest][metric],
+                              "prior_label": prior_label,
+                              "prior": prior_rec[metric]}
         else:
             # 单季值滚动求和（现金流科目仅当全部为 6-K 单季披露时适用）
             if metric in _CF_METRICS and not all(r.get("form") == "6-K" for r in after.values()):
+                detail[metric] = {"formula": "rolling", "annual": a_val,
+                                  "missing_reason":
+                                      "现金流科目为 10-Q/6-K 混合披露，单季/YTD 口径不一致，无法滚动"}
                 continue
+            comps = []
             total = a_val
-            for q, r in after.items():
+            missing_q_label = None
+            for q, r in sorted(after.items()):
                 prior_rec = prior.get(q)
                 if prior_rec is None or prior_rec.get(metric) is None:
                     total = None
+                    missing_q_label = f"{(fy + 1) % 100}Q{q}"
                     break
+                comps.append((f"{(fy + 1) % 100}Q{q}", r[metric], prior_rec[metric]))
                 total += r[metric] - prior_rec[metric]
             if total is not None:
                 ttm[metric] = total
+            detail[metric] = {"formula": "rolling", "annual": a_val,
+                              "components": comps,
+                              "missing_q_label": missing_q_label}
 
     if ttm:
         ttm["base_period"] = f"TTM 截至 {fy + 1}Q{max(after)}"
+        ttm["detail"] = detail
     return ttm
 
 
@@ -608,7 +636,42 @@ def sensitivity_analysis(
 
 # ── 报告生成 ────────────────────────────────────────────
 
-def generate_report(ticker, dcf_result, sensitivity, owner_earnings_data, quote, params, data_source="SEC", warnings=None, stale_analysis=False):
+# 行情源标识 → 报告展示用名称
+_QUOTE_SOURCE_LABEL = {"futu": "Futu 行情", "tencent": "腾讯行情"}
+
+
+def _fmt_m(v):
+    """千分位整数（百万单位，负数保留符号）"""
+    return f"{v:,.0f}"
+
+
+def _ttm_derive_text(metric, info):
+    """compute_ttm 的单指标推导明细 → 人读推导文本（与实际使用的公式一致）。
+
+    capex 在提取文件中为负数（现金流出），展示时取绝对值。
+    """
+    if info is None:
+        return "最新年报缺该科目，无法构造 TTM"
+    if "missing_reason" in info:
+        return info["missing_reason"]
+    show = abs if metric == "capex" else (lambda x: x)
+    if info["formula"] == "ytd":
+        head = (f"YTD 公式：年报 {_fmt_m(show(info['annual']))} "
+                f"+ {info['after_label']} {_fmt_m(show(info['after']))}")
+        if "missing_prior_label" in info:
+            return f"{head}，上年同期（{info['missing_prior_label']}）缺失，无法计算"
+        return (f"{head} − {info['prior_label']} {_fmt_m(show(info['prior']))}")
+    # rolling：年报 + Σ(年后单季 − 上年同期单季)
+    parts = [f"年报 {_fmt_m(show(info['annual']))}"]
+    parts += [f"{label} ({_fmt_m(a)}−{_fmt_m(p)})"
+              for label, a, p in info.get("components", [])]
+    text = " + ".join(parts)
+    if info.get("missing_q_label"):
+        text += f"，{info['missing_q_label']} 上年同期单季缺失，无法滚动"
+    return text
+
+
+def generate_report(ticker, dcf_result, sensitivity, owner_earnings_data, quote, params, data_source="SEC", warnings=None, stale_analysis=False, base_ttm=None):
     """生成 DCF 估值报告 Markdown"""
     lines = []
 
@@ -629,22 +692,54 @@ def generate_report(ticker, dcf_result, sensitivity, owner_earnings_data, quote,
         lines.append("> ⚠️ 本报告基于旧版分析数据（legacy），结果可能不可靠，建议先重新生成财报分析")
         lines.append("")
 
-    # ── 基本信息 ──
+    # ── 基本信息（4 列：项目|数值 两两并排，减少纵向长度）──
+    # 展示参与计算的全部输入：股价/行情来源、市值、流通股数+来源、数据截止期，
+    # 便于发现"结果对不上"背后的数据错误
     lines.append("## 基本信息")
     lines.append("")
-    lines.append("| 项目 | 数值 |")
-    lines.append("|:---|:---|")
+    lines.append("| 项目 | 数值 | 项目 | 数值 |")
+    lines.append("|:---|:---|:---|:---|")
+
+    def _cell(v):
+        return v if v not in (None, "") else "-"
+
     if quote:
-        lines.append(f"| 公司名称 | {company_name} |")
-        lines.append(f"| 当前股价 | ${quote.get('price', 0):.2f} |")
+        price_cell = f"${quote.get('price', 0):.2f}"
         mc = quote.get("marketCap", 0)
-        lines.append(f"| 市值 | ${mc/1e9:.1f}B |" if mc else "| 市值 | - |")
+        mc_cell = f"${mc/1e9:.1f}B" if mc else "-"
+        src = quote.get("source", "")
+        src_cell = _QUOTE_SOURCE_LABEL.get(src, src)
+    else:
+        price_cell, mc_cell, src_cell = "-", "-", "-"
+
+    shares_cell = ""
+    shares_m = params.get("shares_millions")
+    if shares_m:
+        shares_note = params.get("shares_note", "")
+        # 来源标注用 " · " 分隔，避免与 "SEC 封面（2026Q2）" 中的括号嵌套
+        shares_cell = f"{shares_m:,.1f}M" + (f" · {shares_note}" if shares_note else "")
+    elif quote:
+        # params 未携带时按行情兜底展示（兼容外部直接调用）
         so = quote.get("sharesOutstanding", 0) or 0
         if so:
-            lines.append(f"| 流通股数 | {so/1e6:.1f}M |")
+            src = quote.get("source", "")
+            shares_cell = f"{so/1e6:,.1f}M" + (f" · {_QUOTE_SOURCE_LABEL.get(src, src)}" if src else "")
         elif quote.get("marketCap") and quote.get("price"):
             derived_so = quote["marketCap"] / quote["price"] / 1e6
-            lines.append(f"| 流通股数 | {derived_so:.1f}M (推算) |")
+            shares_cell = f"{derived_so:,.1f}M（推算）"
+
+    # 数据截止期：TTM 基期取 TTM 期末，否则最新年报期
+    basis = params.get("base_oe_basis", "annual")
+    if basis in ("ttm", "ttm_fcf") and base_ttm and base_ttm.get("base_period"):
+        data_cutoff = base_ttm["base_period"]
+    elif owner_earnings_data:
+        data_cutoff = f"最新年报 {owner_earnings_data[-1].get('year', '')}".strip()
+    else:
+        data_cutoff = base_note
+
+    lines.append(f"| 公司名称 | {_cell(company_name)} | 当前股价 | {_cell(price_cell)} |")
+    lines.append(f"| 行情来源 | {_cell(src_cell)} | 市值 | {_cell(mc_cell)} |")
+    lines.append(f"| 流通股数 | {_cell(shares_cell)} | 数据截止期 | {_cell(data_cutoff)} |")
     lines.append("")
 
     # ── Owner Earnings 计算 ──
@@ -669,16 +764,74 @@ def generate_report(ticker, dcf_result, sensitivity, owner_earnings_data, quote,
         lines.append("*未能获取历史 Owner Earnings 数据*")
         lines.append("")
 
-    # ── DCF 计算参数 ──
+    # ── 基期 Owner Earnings 明细（逐项推导，便于发现数据错误）──
+    if owner_earnings_data:
+        lines.append("## 基期 Owner Earnings 明细")
+        lines.append("")
+        ttm_detail = base_ttm.get("detail") if base_ttm else None
+        if basis in ("ttm", "ttm_fcf") and ttm_detail is not None:
+            lines.append(f"> 单位：百万{cur}；{base_ttm.get('base_period', 'TTM')}。"
+                         "利润表科目按单季逐年滚动，现金流科目按 YTD 累计公式推导。")
+        else:
+            lines.append(f"> 单位：百万{cur}。未启用 TTM（成分缺失），回退最新年报。")
+        lines.append("")
+        lines.append("| 成分 | 数值 | 推导 |")
+        lines.append("|:---|:---:|:---|")
+        rows = []
+        if basis in ("ttm", "ttm_fcf") and ttm_detail is not None:
+            for label, metric, is_outflow in (("净利润（TTM）", "net_income", False),
+                                              ("折旧摊销（TTM）", "depreciation", False),
+                                              ("CapEx（TTM）", "capex", True)):
+                val = base_ttm.get(metric)
+                deriv = _ttm_derive_text(metric, ttm_detail.get(metric))
+                if val is None:
+                    rows.append((label, "-", deriv))
+                else:
+                    shown = abs(val) if is_outflow else val
+                    rows.append((label, _fmt_m(shown), deriv))
+            if basis == "ttm":
+                maint = abs(base_ttm.get("capex") or 0) * 0.6
+                rows.append(("维护性 CapEx（×0.6）", _fmt_m(maint), "CapEx × 0.6"))
+                rows.append(("**基期 Owner Earnings**", f"**{_fmt_m(dcf_result['base_earnings'])}**",
+                             "净利润 + 折旧摊销 − 维护性 CapEx"))
+            else:
+                rows.append(("维护性 CapEx（×0.6）", "-", "折旧摊销或 CapEx 的 TTM 缺失"))
+                rows.append(("**基期 Owner Earnings**", f"**{_fmt_m(dcf_result['base_earnings'])}**",
+                             "TTM 自由现金流（FCF 口径）"))
+        else:
+            latest_annual = owner_earnings_data[-1]
+            lp = latest_annual.get("year", "?")
+            for label, key in (("净利润", "net_income"),
+                               ("折旧摊销", "depreciation"),
+                               ("CapEx", "capex")):
+                val = latest_annual.get(key)
+                if val:
+                    rows.append((f"{label}（{lp}）", _fmt_m(abs(val)), f"最新年报 {lp}"))
+                else:
+                    rows.append((f"{label}（{lp}）", "-", "最新年报缺该科目"))
+            mcapex = latest_annual.get("maintenance_capex")
+            if mcapex:
+                rows.append(("维护性 CapEx（×0.6）", _fmt_m(mcapex), "CapEx × 0.6"))
+                rows.append(("**基期 Owner Earnings**", f"**{_fmt_m(dcf_result['base_earnings'])}**",
+                             "净利润 + 折旧摊销 − 维护性 CapEx"))
+            else:
+                rows.append(("维护性 CapEx（×0.6）", "-", "折旧摊销或 CapEx 缺失"))
+                rows.append(("**基期 Owner Earnings**", f"**{_fmt_m(dcf_result['base_earnings'])}**",
+                             "最新年报自由现金流（FCF 口径）"))
+        for label, val, deriv in rows:
+            lines.append(f"| {label} | {val} | {deriv} |")
+        lines.append("")
+
+    # ── DCF 计算参数（4 列：两两并排，减少纵向长度）──
     lines.append("## DCF 计算参数")
     lines.append("")
-    lines.append("| 参数 | 数值 | 说明 |")
-    lines.append("|:---|:---:|:---|")
-    lines.append(f"| 基期 Owner Earnings | {cur}{dcf_result['base_earnings']:,.0f}M | {base_note} |")
-    lines.append(f"| 预测增长率 | {dcf_result['growth_rate']*100:.1f}% | 基于历史数据估算 |")
-    lines.append(f"| 折现率 (WACC) | {dcf_result['discount_rate']*100:.1f}% | 巴菲特通常使用 10% |")
-    lines.append(f"| 永续增长率 | {dcf_result['terminal_growth']*100:.1f}% | 长期 GDP 增速附近 |")
-    lines.append(f"| 预测年数 | {dcf_result['projection_years']}年 | 通常 5-10 年 |")
+    lines.append("| 项目 | 数值 | 项目 | 数值 |")
+    lines.append("|:---|:---:|:---|:---:|")
+    lines.append(f"| 基期 Owner Earnings | {cur}{dcf_result['base_earnings']:,.0f}M "
+                 f"| 预测增长率 | {dcf_result['growth_rate']*100:.1f}% |")
+    lines.append(f"| 折现率 (WACC) | {dcf_result['discount_rate']*100:.1f}% "
+                 f"| 永续增长率 | {dcf_result['terminal_growth']*100:.1f}% |")
+    lines.append(f"| 预测年数 | {dcf_result['projection_years']}年 | 基期口径 | {base_note} |")
     lines.append("")
 
     # ── 预测现金流 ──
@@ -938,11 +1091,12 @@ def main():
 
     # ── 6. DCF 估值 ──
     # 基期优先用 TTM（最新年报 + 年后季报滚动），年报滞后最多 3 个季度；
-    # TTM 成分缺失时回退最新年报
+    # TTM 成分缺失时回退最新年报（base_oe_basis 供报告标注基期口径）
     if quarterly_data:
         print(f"\n📅 读取 {len(quarterly_data)} 期季报数据（用于 TTM 基期）")
     base_oe = owner_earnings_data[-1]["owner_earnings"]
     base_oe_note = "最新年报的 Owner Earnings"
+    base_oe_basis = "annual"
     ttm = compute_ttm(sec_data, quarterly_data)
     if ttm.get("net_income") is not None:
         # capex TTM 为负数流出表示，取绝对值
@@ -951,21 +1105,33 @@ def main():
         if t_dep > 0 and t_capex > 0:
             base_oe = calculate_owner_earnings(ttm["net_income"], t_dep, t_capex * 0.6)
             base_oe_note = f"{ttm['base_period']}（年报+季报滚动）"
+            base_oe_basis = "ttm"
         elif (ttm.get("fcf") or 0) > 0:
             base_oe = ttm["fcf"]
             base_oe_note = f"{ttm['base_period']}（FCF 口径）"
+            base_oe_basis = "ttm_fcf"
 
-    # 流通股数：Futu 优先，无行情时用 SEC 财报封面股数兜底（最新季报封面 > 最新年报封面）
-    shares_outstanding = (quote.get("sharesOutstanding", 0) or 0) / 1e6 if quote else 0
-    current_price = quote.get("price", 0) if quote else 0
+    # 流通股数：Futu/腾讯行情优先，无行情时用 SEC 财报封面股数兜底
+    # （最新季报封面 > 最新年报封面）；shares_note 为报告"基本信息"的来源标注
+    shares_outstanding = 0
+    shares_note = ""
+    current_price = 0
+    if quote:
+        current_price = quote.get("price", 0)
+        shares_outstanding = (quote.get("sharesOutstanding", 0) or 0) / 1e6
+        if shares_outstanding:
+            src = quote.get("source", "")
+            shares_note = _QUOTE_SOURCE_LABEL.get(src, src)
 
     if shares_outstanding == 0 and quote and quote.get("marketCap") and current_price > 0:
         shares_outstanding = quote["marketCap"] / current_price / 1e6
+        shares_note = "市值/股价推算"
 
     if shares_outstanding == 0:
         cover_shares, cover_period = latest_cover_shares(quarterly_data, sec_data)
         if cover_shares:
             shares_outstanding = cover_shares
+            shares_note = f"SEC 封面（{cover_period}）"
             print(f"  ℹ️  流通股数来自 SEC 封面（{cover_period}）: {cover_shares:,.1f}M")
 
     # PDD 等 ¥ 报表公司：美股 ADS 报价为美元，每股价值未做汇率换算
@@ -1022,9 +1188,12 @@ def main():
     report = generate_report(ticker, dcf_result, sensitivity, owner_earnings_data, quote,
                              {"growth": growth_rate, "discount": discount_rate,
                               "terminal_growth": terminal_growth, "years": args.years,
-                              "currency": cur, "base_period": base_oe_note},
+                              "currency": cur, "base_period": base_oe_note,
+                              "base_oe_basis": base_oe_basis,
+                              "shares_millions": shares_outstanding,
+                              "shares_note": shares_note},
                              data_source="SEC", warnings=warnings,
-                             stale_analysis=bool(stale))
+                             stale_analysis=bool(stale), base_ttm=ttm)
 
     # 保存报告（文件名带秒级时间戳：每次估值落一份独立文件，重跑不覆盖历史；
     # webapp 的 register_dcf 按 local_path 去重，时间戳保证每次估值在库里新建一条记录）

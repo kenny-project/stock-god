@@ -112,6 +112,28 @@ def test_parse_dcf_valuation_without_per_share_section():
     assert "safety_25_price" not in v
 
 
+def test_parse_dcf_valuation_four_column_basic_info():
+    """新版 4 列基本信息（项目|数值 两两并排）：当前股价须从第 3/4 列解析出来；
+    带中文来源标注/非数值单元格不得破坏解析。"""
+    text = """## 基本信息
+
+| 项目 | 数值 | 项目 | 数值 |
+|:---|:---|:---|:---|
+| 公司名称 | 谷歌-A | 当前股价 | $349.54 |
+| 行情来源 | 腾讯行情 | 市值 | $4,274.9B |
+| 流通股数 | 12,229.9M · 腾讯行情 | 数据截止期 | TTM 截至 2026Q2 |
+
+## 估值结果
+
+| 项目 | 数值 |
+|:---|:---|
+| **股权内在价值** | **$47,099M** |
+"""
+    v = parse_dcf_valuation(text)
+    assert v["price"] == 349.54
+    assert v["intrinsic_value_musd"] == 47099
+
+
 def test_parse_dcf_valuation_fy_rows_scoped_to_owner_earnings():
     """敏感性分析行（如 `| 20% | $47 | ...`，--growth 20 时真实生成）
     不得被当成年度 Owner Earnings 数据编造进 owner_earnings_by_year。"""
