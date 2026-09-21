@@ -12,10 +12,12 @@ QuoteSource 适配器契约:
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
-from common import QuoteSource  # noqa: E402
+import common  # noqa: E402
+from common import QuoteSource, TencentQuoteProvider  # noqa: E402
 
 
 class _FakeProvider:
@@ -67,6 +69,62 @@ class TestQuoteSource(unittest.TestCase):
     def test_returns_none_when_all_fail(self):
         source = QuoteSource([_FakeProvider(None), _FakeProvider(error=True)])
         self.assertIsNone(source.get_snapshot("US.TEST"))
+
+
+class TestTencentQuoteProvider(unittest.TestCase):
+    """腾讯美股源市值/股数字段映射。
+
+    实测（2026-09-18，GOOGL/AAPL/NVDA 交叉验证）：
+      [45] = 总市值（亿美元） = [62]总股本(股) × 现价，逐只吻合
+      [44] = 流通市值（亿美元）、[63] = 流通股本；SKILL.md 速查表把 [44]/[45] 标反了
+    """
+
+    def _fetch(self, fields, ticker="US.GOOGL"):
+        body = ('v_test="' + "~".join(fields) + '";').encode("gbk")
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return body
+
+        with mock.patch.object(common.urllib.request, "urlopen",
+                               lambda req, timeout=None: _Resp()):
+            return TencentQuoteProvider().get_snapshot(ticker)
+
+    def test_us_market_cap_and_shares(self):
+        # 2026-09-18 实测 GOOGL：price=349.54，[45]=42748.51421（亿美元），[62]=12229934831（股）
+        fields = ["0"] * 63
+        fields[1], fields[2], fields[3] = "谷歌-A", "GOOGL.OQ", "349.54"
+        fields[45], fields[62] = "42748.51421", "12229934831"
+        snap = self._fetch(fields)
+        self.assertEqual(snap["source"], "tencent")
+        self.assertEqual(snap["marketCap"], 42748.51421 * 1e8)   # 契约单位：美元
+        self.assertEqual(snap["sharesOutstanding"], 12229934831.0)
+        # 实测吻合关系：市值 = 总股本 × 现价
+        self.assertAlmostEqual(snap["marketCap"] / snap["sharesOutstanding"], 349.54, places=2)
+
+    def test_us_bad_numeric_fields_stay_zero(self):
+        """字段缺失/非数字 → 契约填 0（宁缺勿错，绝不编造）"""
+        fields = ["0"] * 63
+        fields[1], fields[3] = "TEST", "10.0"
+        fields[45], fields[62] = "N/A", ""
+        snap = self._fetch(fields)
+        self.assertEqual(snap["marketCap"], 0)
+        self.assertEqual(snap["sharesOutstanding"], 0)
+
+    def test_short_response_stays_zero(self):
+        """字段不足 63 个（如部分港股返回）→ 市值/股数保持 0，不影响现价"""
+        fields = ["0"] * 30
+        fields[1], fields[3] = "腾讯控股", "700.0"
+        snap = self._fetch(fields, ticker="HK.00700")
+        self.assertEqual(snap["marketCap"], 0)
+        self.assertEqual(snap["sharesOutstanding"], 0)
+        self.assertEqual(snap["price"], 700.0)
 
 
 if __name__ == "__main__":

@@ -12,8 +12,8 @@
     {
       "name":              str,
       "price":             float,  # 现价，<=0 视为无效
-      "marketCap":         float,  # 总市值（元/美元），腾讯源无此数据填 0
-      "sharesOutstanding": float,  # 流通股数（股），腾讯源填 0
+      "marketCap":         float,  # 总市值（元/美元）；腾讯源美股实测可取，港股填 0
+      "sharesOutstanding": float,  # 流通股数（股）；腾讯源美股实测可取（总股本），港股填 0
       "pe":                float,
       "pb":                float,
       "source":            str,    # 命中的数据源标识（futu/tencent/...）
@@ -60,7 +60,16 @@ class FutuQuoteProvider:
 
 
 class TencentQuoteProvider:
-    """腾讯财经行情源（备用，仅现价；无市值/股数，契约缺字段填 0）"""
+    """腾讯财经行情源（备用）。
+
+    美股字段实测（2026-09-18，GOOGL/AAPL/NVDA 三只交叉验证）：
+      [45] = 总市值（亿美元） = [62]总股本(股) × 现价，逐只吻合
+      [44] = 流通市值（亿美元） = [63]流通股本(股) × 现价
+      [62] = 总股本（股，原始计数）  [63] = 流通股本（股）
+      注意：SKILL.md 速查表把美股 [44]/[45] 标反了，本实现以实测为准；
+      [46] 为英文公司名（非 PB），与 CLAUDE.md 已知限制一致。
+    港股仍仅现价（未实测到可靠市值字段），契约缺字段填 0。
+    """
 
     name = "tencent"
 
@@ -88,7 +97,7 @@ class TencentQuoteProvider:
             price = float(fields[3])
         except ValueError:
             return None
-        return {
+        snap = {
             "name": fields[1],
             "price": price,
             "marketCap": 0,
@@ -97,6 +106,18 @@ class TencentQuoteProvider:
             "pb": 0,
             "source": self.name,
         }
+        if mkt == "us" and len(fields) > 62:
+            try:
+                # 契约单位为元/美元（与 Futu total_market_val 一致）：亿美元 × 1e8
+                snap["marketCap"] = float(fields[45]) * 1e8
+            except ValueError:
+                pass  # 字段缺失/非数字 → 保持 0，宁缺勿错
+            try:
+                # [62] 总股本（股）
+                snap["sharesOutstanding"] = float(fields[62])
+            except ValueError:
+                pass
+        return snap
 
 
 class QuoteSource:
