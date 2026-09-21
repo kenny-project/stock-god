@@ -55,6 +55,8 @@ class Analysis(Base):
     quarter: Mapped[str | None] = mapped_column(String(8), default=None)
     local_path: Mapped[str] = mapped_column(String(512))
     metrics: Mapped[dict | None] = mapped_column(JSON, default=None)
+    # 生成器版本（如 "v2"，单一定义点 scripts/dataversion.py）；NULL = 版本机制引入前的 legacy 旧数据
+    generator_version: Mapped[str | None] = mapped_column(String(16), default=None)
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     stock: Mapped["Stock"] = relationship(back_populates="analyses")
 
@@ -69,6 +71,8 @@ class DcfReport(Base):
     safety: Mapped[float | None] = mapped_column(Float, default=None)
     local_path: Mapped[str] = mapped_column(String(512))
     valuation: Mapped[dict | None] = mapped_column(JSON, default=None)
+    # 生成器版本（如 "v1"）；NULL = legacy 旧数据，前端打"旧版"徽标提示重新生成
+    generator_version: Mapped[str | None] = mapped_column(String(16), default=None)
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     stock: Mapped["Stock"] = relationship(back_populates="dcf_reports")
 

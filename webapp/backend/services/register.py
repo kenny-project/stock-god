@@ -7,6 +7,7 @@ from sqlalchemy import select
 from db import ROOT
 from models import Filing, Analysis, DcfReport
 from services.metrics import parse_analysis_metrics, parse_dcf_valuation
+from services.dataversion import parse_md_version
 
 _PERIOD = re.compile(r"[-_](\d{8})$")
 _FORM = re.compile(r"(10-?K|10-?Q|20-?F|6-?K)", re.I)
@@ -129,9 +130,12 @@ def register_analysis(session, stock, base_dir: str | None = None) -> int:
         if not _valid_file(full) or (form, year, quarter) in existing:
             continue
         with open(full, encoding="utf-8") as f:
-            metrics = parse_analysis_metrics(f.read())
+            content = f.read()
+        metrics = parse_analysis_metrics(content)
+        # 头部 `生成器版本: analysis-v2` 行 → "v2"；无该行 → NULL（legacy 旧数据）
         session.add(Analysis(stock_id=stock.id, form_type=form, fiscal_year=year, quarter=quarter,
-                             local_path=_rel(full), metrics=metrics or None))
+                             local_path=_rel(full), metrics=metrics or None,
+                             generator_version=parse_md_version(content, "analysis")))
         existing.add((form, year, quarter))
         n += 1
     session.commit()
@@ -158,9 +162,12 @@ def register_dcf(session, stock, base_dir: str | None = None) -> int:
         if rel in existing:
             continue
         with open(full, encoding="utf-8") as f:
-            valuation = parse_dcf_valuation(f.read())
+            content = f.read()
+        valuation = parse_dcf_valuation(content)
+        # 头部 `生成器版本: dcf-v1` 行 → "v1"；无该行 → NULL（legacy 旧数据）
         session.add(DcfReport(stock_id=stock.id, local_path=rel, valuation=valuation or None,
-                              generated_at=datetime.fromtimestamp(os.path.getmtime(full))))
+                              generated_at=datetime.fromtimestamp(os.path.getmtime(full)),
+                              generator_version=parse_md_version(content, "dcf")))
         existing.add(rel)
         n += 1
     session.commit()

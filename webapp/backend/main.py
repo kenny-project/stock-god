@@ -12,6 +12,7 @@ from executor import TaskExecutor
 from api import stocks as stocks_api
 from api import tasks_api
 from api import reports as reports_api
+from api import versions as versions_api
 from services.edgar import fetch_company_tickers, upsert_stocks
 
 
@@ -43,6 +44,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"],
 app.include_router(stocks_api.router)
 app.include_router(tasks_api.router)
 app.include_router(reports_api.router)
+app.include_router(versions_api.router)
 
 # 生产模式：托管前端构建产物（SPA 回退到 index.html；realpath 校验防路径穿越）
 DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend-dist"))

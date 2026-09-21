@@ -188,3 +188,42 @@ def test_register_dcf_timestamped_filename_new_row_per_run(tmp_path):
     # 同一文件重复登记仍不重复（幂等保留）
     assert register_dcf(s, st, base_dir=str(base)) == 0
     assert s.scalar(select(func.count(DcfReport.id))) == 2
+
+
+def test_register_analysis_generator_version(tmp_path):
+    """md 头部 `生成器版本: analysis-v2` 行 → generator_version="v2"；
+    无该行（旧产物）→ NULL（legacy），前端据此打"旧版"徽标。"""
+    s = _session()
+    st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+    base = tmp_path / "reports" / "sec_analysis" / "NKE"
+    base.mkdir(parents=True)
+    # 新版产物：fixture 头部插入版本行（fixture 本身无版本行）
+    fresh = base / "10-K_FY2030.md"
+    src = open(os.path.join(FIXTURES, "10-K_FY2024.md"), encoding="utf-8").read()
+    fresh.write_text(src.replace(
+        "提取时间:", "生成器版本: analysis-v2\n\n提取时间:", 1), encoding="utf-8")
+    # legacy 产物：原样拷贝（无版本行）
+    shutil.copy(os.path.join(FIXTURES, "10-K_FY2024.md"), base / "10-K_FY2024.md")
+    n = register_analysis(s, st, base_dir=str(base))
+    assert n == 2
+    rows = {a.fiscal_year: a for a in s.scalars(select(Analysis)).all()}
+    assert rows[2030].generator_version == "v2"
+    assert rows[2024].generator_version is None
+
+
+def test_register_dcf_generator_version(tmp_path):
+    """DCF md 头部 `生成器版本: dcf-v1` 行 → generator_version="v1"；无该行 → NULL。"""
+    s = _session()
+    st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+    base = tmp_path / "reports" / "dcf"
+    base.mkdir(parents=True)
+    src = open(os.path.join(FIXTURES, "US.NKE_DCF.md"), encoding="utf-8").read()
+    f1 = base / "US.NKE_DCF_20260920_120000.md"
+    f1.write_text(src.replace(
+        "生成时间:", "生成器版本: dcf-v1\n生成时间:", 1), encoding="utf-8")
+    shutil.copy(os.path.join(FIXTURES, "US.NKE_DCF.md"), base / "US.NKE_DCF_legacy.md")
+    n = register_dcf(s, st, base_dir=str(base))
+    assert n == 2
+    rows = {os.path.basename(r.local_path): r for r in s.scalars(select(DcfReport)).all()}
+    assert rows["US.NKE_DCF_20260920_120000.md"].generator_version == "v1"
+    assert rows["US.NKE_DCF_legacy.md"].generator_version is None

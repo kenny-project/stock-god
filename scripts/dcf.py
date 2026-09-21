@@ -23,6 +23,7 @@ import sys
 from datetime import datetime
 
 from common import QuoteSource
+from dataversion import ANALYSIS_VERSION, DCF_VERSION
 
 # 目录配置
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -35,6 +36,15 @@ REPORTS_DIR = os.path.join(PROJECT_ROOT, "reports")
 
 
 # ── SEC 分析数据读取 ────────────────────────────────────
+
+def _parse_gen_version(content):
+    """解析分析 md 头部 `生成器版本: analysis-v2` 行 → "v2"；无该行 → None（legacy 旧数据）"""
+    for line in content.splitlines()[:20]:
+        m = re.match(r"生成器版本:\s*analysis-(\S+)$", line.strip())
+        if m:
+            return m.group(1)
+    return None
+
 
 def _read_sec_records(ticker):
     """从 sec_analysis 提取的 .md 文件中读取全部年报/季报记录"""
@@ -55,7 +65,8 @@ def _read_sec_records(ticker):
         except Exception:
             continue
 
-        record = {"source": md_file, "type": "10-Q"}
+        record = {"source": md_file, "type": "10-Q",
+                  "gen_version": _parse_gen_version(content)}
         # 表单类型：20-F（外国发行人年报）等同 10-K 年报口径；6-K 为中期申报
         if "20-F" in md_file:
             record["form"], record["type"] = "20-F", "10-K"
@@ -203,6 +214,15 @@ def compute_ttm(annual, quarterly):
 
 
 # ── 数据验证 ────────────────────────────────────────────
+
+def find_stale_analysis(sec_data, quarterly_data):
+    """找出旧版生成器产物：头部无版本号（legacy）或版本 ≠ 当前 ANALYSIS_VERSION 的记录。
+
+    供 main() 打印告警与在 DCF 报告头部标记；按用户确认的行为：警告后继续计算，不阻断。
+    """
+    return [r for r in list(sec_data) + list(quarterly_data)
+            if r.get("gen_version") != ANALYSIS_VERSION]
+
 
 def validate_sec_data(sec_data, quarterly_data=None):
     """
@@ -588,7 +608,7 @@ def sensitivity_analysis(
 
 # ── 报告生成 ────────────────────────────────────────────
 
-def generate_report(ticker, dcf_result, sensitivity, owner_earnings_data, quote, params, data_source="SEC", warnings=None):
+def generate_report(ticker, dcf_result, sensitivity, owner_earnings_data, quote, params, data_source="SEC", warnings=None, stale_analysis=False):
     """生成 DCF 估值报告 Markdown"""
     lines = []
 
@@ -600,9 +620,14 @@ def generate_report(ticker, dcf_result, sensitivity, owner_earnings_data, quote,
     lines.append(f"# {company_name} ({ticker}) DCF 估值分析")
     lines.append("")
     lines.append(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    # 生成器版本号：入库时解析该行写 generator_version 列，无该行视为 legacy 旧数据
+    lines.append(f"生成器版本: dcf-{DCF_VERSION}")
     lines.append(f"估值方法: 巴菲特 Owner Earnings 折现模型")
     lines.append(f"数据来源: {data_source}")
     lines.append("")
+    if stale_analysis:
+        lines.append("> ⚠️ 本报告基于旧版分析数据（legacy），结果可能不可靠，建议先重新生成财报分析")
+        lines.append("")
 
     # ── 基本信息 ──
     lines.append("## 基本信息")
@@ -835,6 +860,14 @@ def main():
     # ── 2.5 数据验证 ──
     print("\n🔍 验证数据质量...")
     quarterly_data = read_sec_quarterly(ticker)
+    # 生成器版本校验：旧版/legacy 分析数据参与计算前先告警（警告后继续，不阻断）
+    stale = find_stale_analysis(sec_data, quarterly_data)
+    if stale:
+        print("\n⚠️  部分分析数据为旧版生成器产物（legacy/旧版本号），建议重新生成财报分析后再估值")
+        for r in stale:
+            v = r.get("gen_version")
+            why = "legacy 无版本号" if not v else f"版本 {v} ≠ 当前 {ANALYSIS_VERSION}"
+            print(f"    - {r.get('source', '?')}（{why}）")
     errors, warnings = validate_sec_data(sec_data, quarterly_data)
     if warnings:
         for w in warnings:
@@ -990,7 +1023,8 @@ def main():
                              {"growth": growth_rate, "discount": discount_rate,
                               "terminal_growth": terminal_growth, "years": args.years,
                               "currency": cur, "base_period": base_oe_note},
-                             data_source="SEC", warnings=warnings)
+                             data_source="SEC", warnings=warnings,
+                             stale_analysis=bool(stale))
 
     # 保存报告（文件名带秒级时间戳：每次估值落一份独立文件，重跑不覆盖历史；
     # webapp 的 register_dcf 按 local_path 去重，时间戳保证每次估值在库里新建一条记录）

@@ -307,3 +307,19 @@ async def test_filed_count(client):
         assert r.json()["items"][0]["filed_count"] == 0
         r = await c.get("/api/stocks/NKE")
         assert r.json()["filed_count"] == 2
+
+
+async def test_versions_endpoint(client):
+    """/api/versions 返回当前生成器版本，与单一定义点 scripts/dataversion.py 一致。"""
+    import os
+    import sys
+    scripts_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "scripts"))
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import dataversion as scripts_dv
+    async with client as c:
+        r = await c.get("/api/versions")
+        assert r.status_code == 200
+        assert r.json() == {"analysis": scripts_dv.ANALYSIS_VERSION,
+                            "dcf": scripts_dv.DCF_VERSION}

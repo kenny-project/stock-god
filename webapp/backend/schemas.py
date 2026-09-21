@@ -50,6 +50,8 @@ class AnalysisOut(BaseModel):
     quarter: str | None = None  # 季报有值（如 "2024Q3"），年报为 None
     period: str | None = None  # 配对到的财报报告期（filing.period），配不到为 None
     metrics: dict | None
+    # 生成器版本（如 "v2"）；NULL = legacy 旧数据，前端据此打"旧版"徽标（仅提示不阻断）
+    generator_version: str | None = None
     generated_at: datetime
 
 
@@ -61,6 +63,8 @@ class DcfOut(BaseModel):
     years: int | None
     safety: float | None
     valuation: dict | None
+    # 生成器版本（如 "v1"）；NULL = legacy 旧数据，前端据此打"旧版"徽标（仅提示不阻断）
+    generator_version: str | None = None
     generated_at: datetime
 
 

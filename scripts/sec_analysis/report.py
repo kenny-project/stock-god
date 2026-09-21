@@ -15,6 +15,10 @@ from typing import Dict, List, Any, Optional, Tuple
 # 导入必填字段定义
 from .extraction import REQUIRED_METRIC_FIELDS, REQUIRED_CASHFLOW_FIELDS
 
+# 生成器版本号（单一定义点 scripts/dataversion.py；本包由 scripts/ 下的 CLI
+# 入口加载，scripts/ 均在 sys.path 上）
+from dataversion import ANALYSIS_VERSION
+
 # 翻译功能
 try:
     from deep_translator import GoogleTranslator, MyMemoryTranslator
@@ -616,6 +620,8 @@ def generate_extraction_md(
     lines = []
     lines.append(f"# {ticker.upper()} {filing_type} {fiscal_period}")
     lines.append(f"\n提取时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    # 生成器版本号：入库时解析该行写 generator_version 列，无该行视为 legacy 旧数据
+    lines.append(f"生成器版本: analysis-{ANALYSIS_VERSION}\n")
 
     # 财务指标表格
     lines.append("## 财务指标\n")
