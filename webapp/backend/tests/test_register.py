@@ -45,6 +45,53 @@ def _build_download_tree(tmp_path):
     return base
 
 
+def test_register_download_dir_form_from_representative_filename(tmp_path):
+    """PFE 式误判根治：顶层主文档 pfe-20201226x10q.htm 先登记 (10-Q, 2020-12-26)，
+    同期目录 pfe-20201226/ 目录名无 form token，但代表文件名含 10q → 提取出 10-Q，
+    (10-Q, 2020-12-30 期) 槽位已被占据 → 目录不再重复登记，只入一行正确类型。"""
+    s = _session()
+    st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+    base = tmp_path / "reports" / "sec_filings" / "NKE"
+    d = base / "pfe-20201226"  # 目录名无 form token
+    d.mkdir(parents=True)
+    (d / "pfe-exh101x3292026x10q.htm").write_bytes(b"<html>exhibit main</html>")
+    (d / "pfe-20201226.xsd").write_bytes(b"<xsd/>")
+    (base / "pfe-10q_20201226.htm").write_bytes(b"<html>main doc</html>")
+    n = register_download(s, st, base_dir=str(base))
+    rows = s.scalars(select(Filing)).all()
+    assert len(rows) == 1
+    f = rows[0]
+    assert f.form_type == "10-Q"  # 顶层文件名含 token
+    assert f.period == "2020-12-26"
+    assert f.local_path.endswith("pfe-10q_20201226.htm")
+    assert n == 1
+
+
+def test_register_download_unknown_blocked_by_known_period(tmp_path):
+    """目录名与代表文件名都提取不到 form token，且该申报期已有已知类型行
+    （顶层 10-Q 主文档）→ 不再登记 UNKNOWN 行（杜绝成对重复）；
+    另一个无同期已知行的独立目录仍正常登记 UNKNOWN。"""
+    s = _session()
+    st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+    base = tmp_path / "reports" / "sec_filings" / "NKE"
+    d1 = base / "aapl-20201226"  # 无 token 目录，同期已有已知行
+    d1.mkdir(parents=True)
+    (d1 / "aapl-20201226.htm").write_bytes(b"<html/>")  # 代表文件名也无 token
+    d2 = base / "spcx-20210331"  # 独立 UNKNOWN：无同期已知行
+    d2.mkdir(parents=True)
+    (d2 / "spcx-20210331.htm").write_bytes(b"<html/>")
+    s.add(Filing(stock_id=st.id, form_type="10-Q", period="2020-12-26",
+                 local_path="reports/sec_filings/NKE/aapl-20201226x10q.htm"))
+    s.commit()
+    n = register_download(s, st, base_dir=str(base))
+    rows = s.scalars(select(Filing)).all()
+    assert n == 1  # 只登记独立 UNKNOWN，同期已有已知行的目录被挡掉
+    assert len(rows) == 2
+    by_period = {f.period: f.form_type for f in rows}
+    assert by_period["2020-12-26"] == "10-Q"  # 未被 UNKNOWN 挤出重复行
+    assert by_period["2021-03-31"] == "UNKNOWN"  # 独立 UNKNOWN 正常登记
+
+
 def test_register_download_msft_style_main_doc(tmp_path):
     """MSFT 布局：目录内 7 个文件共享 (10-K, 2022-06-30)，只登记 1 行且指向主文档 .htm。"""
     s = _session()

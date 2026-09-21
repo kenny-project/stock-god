@@ -62,6 +62,11 @@ def register_download(session, stock, base_dir: str | None = None) -> int:
     目录只登记一个代表文件（主文档优先），同一 (form_type, period) 只入库一行。
     两遍扫描：顶层文件（EDGAR 主文档，如 nke-20220531.htm）先于同名申报期目录登记，
     让主文档占据 (form_type, period) 槽位，目录里的 exhibit/XBRL 附件不会挤掉它。
+
+    form 类型来源：目录用代表文件名提取（如 pfe-exh101x3292026x10q.htm 含 10q），
+    提取不到再回退目录名，仍提取不到才 UNKNOWN；顶层文件名即代表文件名。
+    兜底查重：某申报期已有任何已知类型（非 UNKNOWN）行时不再登记 UNKNOWN 行，
+    杜绝同一 (stock, period) 出现 10-Q + UNKNOWN 成对重复。
     """
     base = base_dir or os.path.join(ROOT, "reports", "sec_filings", stock.ticker)
     if not os.path.isdir(base):
@@ -70,6 +75,7 @@ def register_download(session, stock, base_dir: str | None = None) -> int:
     existing = {f.local_path for f in rows}
     # uq_filing 唯一约束是 (stock_id, form_type, period)：一个申报期只允许一条记录。
     existing_fp = {(f.form_type, f.period) for f in rows if f.period}
+    known_periods = {f.period for f in rows if f.period and f.form_type != "UNKNOWN"}
     n = 0
     entries = sorted(os.listdir(base))
     for file_pass in (True, False):
@@ -89,13 +95,19 @@ def register_download(session, stock, base_dir: str | None = None) -> int:
             if rel in existing:
                 continue
             period = _period_of(name)
-            form = _form_of(name) or "UNKNOWN"
+            # 目录的代表文件名优先（目录名如 pfe-20260329 不含 form token），
+            # 顶层文件 basename 即 name，两者统一从 cand 取
+            form = _form_of(os.path.basename(cand)) or _form_of(name) or "UNKNOWN"
             if period is not None and (form, period) in existing_fp:
                 continue
+            if period is not None and form == "UNKNOWN" and period in known_periods:
+                continue  # 该申报期已有已知类型行，UNKNOWN 行只会成对重复，不再登记
             session.add(Filing(stock_id=stock.id, form_type=form, period=period, local_path=rel))
             existing.add(rel)
             if period is not None:
                 existing_fp.add((form, period))
+                if form != "UNKNOWN":
+                    known_periods.add(period)
             n += 1
     session.commit()
     return n
