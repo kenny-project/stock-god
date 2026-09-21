@@ -353,6 +353,103 @@ async def test_clear_analyses(env, tmp_path, monkeypatch):
         assert r2.status_code == 200 and r2.json() == {"deleted": 0}
 
 
+async def test_delete_dcf(env, tmp_path, monkeypatch):
+    """删除单条 DCF：删行 + 删 reports/dcf/ 内文件；逃逸该目录的文件保留，仅删行。"""
+    client, Factory, _ = env
+    root = tmp_path / "root"
+    base = root / "reports" / "dcf"
+    base.mkdir(parents=True)
+    inside = base / "US.NKE_DCF_1.md"
+    inside.write_text("# DCF", encoding="utf-8")
+    outside = root / "reports" / "evil.md"  # 逃逸出 reports/dcf/ 的文件
+    outside.write_text("keep", encoding="utf-8")
+    with Factory() as s:
+        from models import Stock, DcfReport
+        st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+        d1 = DcfReport(stock_id=st.id, local_path="reports/dcf/US.NKE_DCF_1.md", valuation={})
+        d2 = DcfReport(stock_id=st.id, local_path="reports/dcf/../evil.md", valuation={})
+        s.add_all([d1, d2])
+        s.commit()
+        id1, id2 = d1.id, d2.id
+    monkeypatch.setattr("api.reports.ROOT", str(root))
+    async with client as c:
+        assert (await c.delete("/api/stocks/XXXX/dcf/1")).status_code == 404
+        assert (await c.delete("/api/stocks/NKE/dcf/9999")).status_code == 404
+        r = await c.delete(f"/api/stocks/NKE/dcf/{id1}")
+        assert r.status_code == 200 and r.json() == {"deleted": 1}
+        assert not inside.exists()
+        r2 = await c.delete(f"/api/stocks/NKE/dcf/{id2}")
+        assert r2.status_code == 200 and r2.json() == {"deleted": 1}
+        assert outside.exists()  # 路径校验：逃逸文件不能被删
+        with Factory() as s:
+            assert s.scalar(select(func.count(DcfReport.id))) == 0
+        # 已删 → 再删 404
+        assert (await c.delete(f"/api/stocks/NKE/dcf/{id1}")).status_code == 404
+
+
+async def test_delete_dcf_file_missing_ok(env, tmp_path, monkeypatch):
+    """文件缺失不阻塞删行。"""
+    client, Factory, _ = env
+    root = tmp_path / "root"
+    (root / "reports" / "dcf").mkdir(parents=True)
+    with Factory() as s:
+        from models import Stock, DcfReport
+        st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+        d = DcfReport(stock_id=st.id, local_path="reports/dcf/ghost.md", valuation={})
+        s.add(d)
+        s.commit()
+        did = d.id
+    monkeypatch.setattr("api.reports.ROOT", str(root))
+    async with client as c:
+        r = await c.delete(f"/api/stocks/NKE/dcf/{did}")
+        assert r.status_code == 200 and r.json() == {"deleted": 1}
+
+
+async def test_delete_dcf_cross_stock_404(env):
+    """别的股票的 dcf_id 挂到本 ticker 下删除 → 404，行保留。"""
+    client, Factory, _ = env
+    with Factory() as s:
+        from models import Stock, DcfReport
+        st = Stock(ticker="MSFT", market="US")
+        s.add(st)
+        s.flush()
+        d = DcfReport(stock_id=st.id, local_path="reports/dcf/US.MSFT_DCF.md", valuation={})
+        s.add(d)
+        s.commit()
+        did = d.id
+    async with client as c:
+        assert (await c.delete(f"/api/stocks/NKE/dcf/{did}")).status_code == 404
+        with Factory() as s:
+            assert s.get(DcfReport, did) is not None
+
+
+async def test_delete_dcf_conflict_409(env):
+    """有 dcf 任务 pending/running 时删除被 409 拦截，行保留；任务结束后可删。"""
+    client, Factory, _ = env
+    with Factory() as s:
+        from models import Stock, Task, DcfReport
+        st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+        d = DcfReport(stock_id=st.id, local_path="reports/dcf/US.NKE_DCF.md", valuation={})
+        s.add(d)
+        s.add(Task(task_type="dcf", stock_id=st.id, status="running"))
+        s.add(Task(task_type="download", stock_id=st.id, status="running"))  # 无关类型不拦截
+        s.commit()
+        did = d.id
+    async with client as c:
+        r = await c.delete(f"/api/stocks/NKE/dcf/{did}")
+        assert r.status_code == 409
+        assert r.json() == {"detail": "该股票有 DCF 任务进行中，请先取消或等待完成"}
+        with Factory() as s:
+            assert s.get(DcfReport, did) is not None  # 未被删除
+        # 任务结束（failed）后恢复删除
+        with Factory() as s:
+            t = s.scalar(select(Task).where(Task.task_type == "dcf"))
+            t.status = "failed"
+            s.commit()
+        r2 = await c.delete(f"/api/stocks/NKE/dcf/{did}")
+        assert r2.status_code == 200 and r2.json() == {"deleted": 1}
+
+
 async def test_clear_analyses_conflict_409(env):
     """有 analysis/dcf 任务 pending/running 时清空被 409 拦截，不删任何分析；任务结束后可清。"""
     client, Factory, _ = env

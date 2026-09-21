@@ -125,10 +125,13 @@
             </template>
             <template v-else>内在价值 ${{ d.valuation.intrinsic_value_musd }}M，现价 ${{ d.valuation.price }}</template>
           </span>
+          <button class="del-btn" :disabled="deletingDcfId === d.id"
+                  @click.stop="deleteDcf(d)">删除</button>
         </div>
         <p v-if="!dcfList.length" class="empty">暂无 DCF 报告，可点击上方"DCF 估值"发起</p>
       </div>
-      <DcfChart v-for="d in dcfList.filter(x => x.valuation)" :key="d.id" :report="d" />
+      <!-- 只渲染当前选中（loadDcf 成功后 activeDcfId 指向）且有估值的报告 -->
+      <DcfChart v-if="activeDcf" :key="activeDcf.id" :report="activeDcf" />
       <MarkdownViewer v-if="dcfMd" :source="dcfMd" />
     </div>
   </div>
@@ -156,6 +159,7 @@ const analysisMd = ref(''), dcfMd = ref('')
 const activeAnalysisId = ref(null), activeDcfId = ref(null)
 const viewMode = ref('list') // 分析 Tab 页内视图：list=列表，detail=单篇分析正文
 const clearing = ref(false) // 清空分析请求进行中，防连点
+const deletingDcfId = ref(null) // 删除请求进行中的 DCF 行 id，防连点
 const dcfForm = reactive({ growth: '', discount: '', years: '', safety: '' })
 const curVersions = ref(null) // 当前生成器版本（/api/versions，加载时取一次），用于旧版徽标
 const message = ref(''), messageType = ref('success')
@@ -274,6 +278,25 @@ async function loadDcf(d) {
   }
 }
 
+// 当前选中的 DCF 报告（需有估值才能画图）；未选中/无估值时不出图
+const activeDcf = computed(() =>
+  dcfList.value.find((x) => x.id === activeDcfId.value && x.valuation) || null)
+
+async function deleteDcf(d) {
+  if (!confirm('删除该条 DCF 报告？')) return
+  deletingDcfId.value = d.id
+  try {
+    await api.deleteDcf(props.ticker, d.id)
+    if (activeDcfId.value === d.id) { activeDcfId.value = null; dcfMd.value = '' }
+    showToast('DCF 报告已删除')
+    await loadAll()
+  } catch (e) {
+    showToast(e.message || '删除失败', 'error')
+  } finally {
+    deletingDcfId.value = null
+  }
+}
+
 function watchUntilDone(ticker) {
   clearInterval(pollTimer)
   const my = ++seq
@@ -381,6 +404,13 @@ onUnmounted(() => { clearInterval(pollTimer); clearTimeout(toastTimer) })
 .detail-title { font-weight: 600; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .muted { color: #666; font-size: 13px; margin-left: 8px; }
+/* DCF 行删除按钮：红色文字小按钮，@click.stop 防触发行点击 */
+.del-btn {
+  border: none; background: none; color: #dc2626; cursor: pointer;
+  font-size: 12px; padding: 0; margin-left: 8px; vertical-align: middle;
+}
+.del-btn:hover { text-decoration: underline; }
+.del-btn:disabled { opacity: .5; cursor: not-allowed; text-decoration: none; }
 /* 旧版生成器产物徽标：红色小标签，悬停提示建议重新生成 */
 .stale-badge {
   color: #dc2626; background: #fef2f2; border: 1px solid #dc2626;

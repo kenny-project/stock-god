@@ -122,6 +122,31 @@ def dcf_content(ticker: str, dcf_id: int, db: Session = Depends(get_db)):
         return {"id": d.id, "valuation": d.valuation, "markdown": f.read()}
 
 
+@router.delete("/stocks/{ticker}/dcf/{dcf_id}")
+def delete_dcf(ticker: str, dcf_id: int, db: Session = Depends(get_db)):
+    """删除单条 DCF 报告：删 dcf_report 行 + 删磁盘 md 文件（仅限 reports/dcf/ 内）。"""
+    st = _get_stock(db, ticker)
+    d = db.get(DcfReport, dcf_id)
+    if not d or d.stock_id != st.id:
+        raise HTTPException(404, "dcf report not found")
+    # 并发防护：与 DCF 任务并行会产生竞态（任务回写孤儿记录或删掉任务产物），先拒绝
+    busy = db.scalar(select(func.count(Task.id)).where(
+        Task.stock_id == st.id, Task.task_type == "dcf",
+        Task.status.in_(("pending", "running"))))
+    if busy:
+        raise HTTPException(409, "该股票有 DCF 任务进行中，请先取消或等待完成")
+    full = os.path.realpath(os.path.join(ROOT, d.local_path))
+    base = os.path.realpath(os.path.join(ROOT, "reports", "dcf")) + os.sep
+    if full.startswith(base) and os.path.isfile(full):
+        try:
+            os.remove(full)
+        except OSError:
+            pass  # 文件缺失/删不掉不阻塞删行
+    db.delete(d)
+    db.commit()
+    return {"deleted": 1}
+
+
 @router.get("/filings/{filing_id}/file")
 def filing_file(filing_id: int, download: bool = False, db: Session = Depends(get_db)):
     f = db.get(Filing, filing_id)

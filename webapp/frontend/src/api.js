@@ -22,6 +22,7 @@ export const api = {
   clearAnalyses: (t) => req(`/api/stocks/${t}/analyses`, { method: 'DELETE' }),
   dcf: (t) => req(`/api/stocks/${t}/dcf`),
   dcfOne: (t, id) => req(`/api/stocks/${t}/dcf/${id}`),
+  deleteDcf: (t, id) => req(`/api/stocks/${t}/dcf/${id}`, { method: 'DELETE' }),
   versions: () => req('/api/versions'),
   tasks: (status = '') => req(`/api/tasks${status ? `?status=${status}` : ''}`),
   task: (id) => req(`/api/tasks/${id}`),
