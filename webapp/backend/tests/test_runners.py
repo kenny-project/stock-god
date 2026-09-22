@@ -33,6 +33,16 @@ def test_build_analysis_command_strips_prefix():
     assert cmd[2] == "NKE"
 
 
+def test_build_analysis_command_file_overrides_all():
+    """行内单文件生成/更新：params.file → --file，且不再带 --all；force 仍生效。"""
+    cmd = build_command("analysis", "US.NKE", {"file": "nke-20220531.htm"})
+    assert "--file" in cmd and "nke-20220531.htm" in cmd
+    assert "--all" not in cmd
+    assert "--force" not in cmd
+    cmd = build_command("analysis", "US.NKE", {"file": "nke-20220531.htm", "force": True})
+    assert "--file" in cmd and "--force" in cmd and "--all" not in cmd
+
+
 def test_classify_rate_limit():
     code, summary = classify_error(1, "HTTPError 403 Forbidden\nrequest blocked by sec.gov")
     assert code == "SEC_RATE_LIMITED"

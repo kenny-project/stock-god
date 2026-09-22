@@ -79,6 +79,28 @@ async def test_create_task_bad_type(client):
         assert r.status_code == 422
 
 
+async def test_create_analysis_task_resolves_filing_file(client):
+    """行内单文件分析：params.filing_id → 后端解析该行财报主文档文件名存入 params.file，
+    runner 据此构造 --file 单文件命令；filing 不属于该股/不存在 → 404。"""
+    from models import Filing
+    async with client as c:
+        with _factory() as s:
+            st = s.query(models.Stock).filter_by(ticker="NKE").one()
+            f = Filing(stock_id=st.id, form_type="10-K", period="2022-05-31",
+                       local_path="reports/sec_filings/NKE/nke-20220531.htm")
+            s.add(f)
+            s.commit()
+            fid = f.id
+        r = await c.post("/api/tasks", json={"task_type": "analysis", "ticker": "NKE",
+                                             "params": {"filing_id": fid, "force": True}})
+        assert r.status_code == 200
+        assert r.json()["params"]["file"] == "nke-20220531.htm"
+        # filing_id 不属于该股 → 404
+        r = await c.post("/api/tasks", json={"task_type": "analysis", "ticker": "NKE",
+                                             "params": {"filing_id": fid + 99999}})
+        assert r.status_code == 404
+
+
 async def test_task_flow_and_cancel(client):
     async with client as c:
         r = await c.get("/api/tasks")

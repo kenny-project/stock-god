@@ -371,8 +371,9 @@ async function openRowAnalysis(f) {
   }
   rowBusyId.value = f.id
   try {
-    const task = await api.createTask('analysis', props.ticker,
-                                      state === 'update' ? { force: true } : {})
+    // filing_id → 后端解析该行主文档文件名，单文件生成/更新（不跑整股 --all）
+    const params = state === 'update' ? { force: true, filing_id: f.id } : { filing_id: f.id }
+    const task = await api.createTask('analysis', props.ticker, params)
     showToast(`分析任务 #${task.id} 已提交，生成完成后自动刷新`)
     await finishRowAnalysis(state, task.id)
   } catch (e) {

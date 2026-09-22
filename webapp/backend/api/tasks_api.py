@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from deps import get_db
-from models import Stock, Task
+from models import Stock, Task, Filing
 from schemas import TaskCreate, TaskOut
 from executor import TaskExecutor
 from api.reports import safe_log_path
@@ -45,12 +45,19 @@ async def create_task(body: TaskCreate, db: Session = Depends(get_db)):
     stock = db.scalar(select(Stock).where(Stock.ticker == body.ticker.upper()))
     if not stock:
         raise HTTPException(404, f"unknown ticker {body.ticker}")
+    # 行内单文件分析：filing_id → 该行财报主文档文件名（--file 按 basename 子串匹配）
+    params = dict(body.params or {})
+    if body.task_type == "analysis" and params.get("filing_id") is not None:
+        f = db.get(Filing, int(params["filing_id"]))
+        if not f or f.stock_id != stock.id:
+            raise HTTPException(404, "filing not found")
+        params["file"] = os.path.basename(f.local_path)
     dup = db.scalar(select(Task).where(Task.stock_id == stock.id, Task.task_type == body.task_type,
                                        Task.status.in_(("pending", "running"))))
     if dup:
         state = "排队" if dup.status == "pending" else "执行"
         raise HTTPException(409, f"同类型任务已在{state}中 (task #{dup.id})")
-    task = create_task_internal(db, body.task_type, stock, body.params)
+    task = create_task_internal(db, body.task_type, stock, params)
     schedule_task(task)
     return TaskOut.model_validate(task)
 

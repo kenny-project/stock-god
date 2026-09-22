@@ -18,7 +18,12 @@ def build_command(task_type: str, symbol: str, params: dict) -> list[str]:
             cmd += ["--form", params["form"]]
         return cmd
     if task_type == "analysis":
-        cmd = [py, os.path.join(SCRIPTS_DIR, "sec_analysis.py"), symbol.split(".", 1)[-1], "--all"]
+        cmd = [py, os.path.join(SCRIPTS_DIR, "sec_analysis.py"), symbol.split(".", 1)[-1]]
+        # file 优先：行内单文件生成/更新（filing 粒度）；无 file 才整股 --all
+        if params.get("file"):
+            cmd += ["--file", params["file"]]
+        else:
+            cmd += ["--all"]
         if params.get("form"):
             cmd += ["--form", params["form"]]
         if params.get("force"):
