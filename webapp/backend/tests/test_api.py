@@ -73,6 +73,41 @@ async def test_create_task_conflict(client):
         assert r2.status_code == 409
 
 
+async def test_create_row_task_conflict_semantics(client):
+    """行内单文件任务冲突语义：整股任务（无 file）在跑 → 行任务被拒（覆盖重叠）；
+    同一文件的行任务在跑 → 拒；不同文件的行任务 → 允许并行排队。"""
+    from models import Filing
+    async with client as c:
+        with _factory() as s:
+            st = s.query(models.Stock).filter_by(ticker="NKE").one()
+            s.add_all([Filing(stock_id=st.id, form_type="10-K", period="2022-05-31",
+                              local_path="reports/sec_filings/NKE/nke-20220531.htm"),
+                       Filing(stock_id=st.id, form_type="10-Q", period="2022-02-28",
+                              local_path="reports/sec_filings/NKE/nke-20220228.htm")])
+            s.commit()
+            f1, f2 = s.query(Filing).order_by(Filing.id).all()
+        # 行任务 A（f1）
+        r = await c.post("/api/tasks", json={"task_type": "analysis", "ticker": "NKE",
+                                             "params": {"filing_id": f1.id}})
+        assert r.status_code == 200
+        # 不同文件行任务 B → 允许并行
+        r = await c.post("/api/tasks", json={"task_type": "analysis", "ticker": "NKE",
+                                             "params": {"filing_id": f2.id}})
+        assert r.status_code == 200
+        # 同文件行任务 → 409
+        r = await c.post("/api/tasks", json={"task_type": "analysis", "ticker": "NKE",
+                                             "params": {"filing_id": f1.id}})
+        assert r.status_code == 409
+        # 清掉后跑整股任务，行任务再点 → 409（整股覆盖重叠）
+        for t in (await c.get("/api/tasks")).json():
+            await c.post(f"/api/tasks/{t['id']}/cancel")
+        r = await c.post("/api/tasks", json={"task_type": "analysis", "ticker": "NKE", "params": {}})
+        assert r.status_code == 200
+        r = await c.post("/api/tasks", json={"task_type": "analysis", "ticker": "NKE",
+                                             "params": {"filing_id": f1.id}})
+        assert r.status_code == 409
+
+
 async def test_create_task_bad_type(client):
     async with client as c:
         r = await c.post("/api/tasks", json={"task_type": "nope", "ticker": "NKE"})

@@ -377,11 +377,10 @@ async function openRowAnalysis(f) {
     showToast(`分析任务 #${task.id} 已提交，生成完成后自动刷新`)
     await finishRowAnalysis(state, task.id)
   } catch (e) {
-    // 409 = 同类型任务已在排队/执行中：提示后轮询该任务，完成仍刷新列表
+    // 409 = 该文件（或整股）已有分析任务排队/执行中。不等待复用：那可能是别的
+    // 行/整股的任务，等待它完成会让用户误以为点的是这行。直接提示，稍后再点
     if (e.status === 409) {
-      const dup = e.message.match(/#(\d+)/)
-      showToast('已有分析任务进行中，等待其完成后刷新')
-      if (dup) await finishRowAnalysis(state, Number(dup[1]))
+      showToast('该行已有分析任务进行中，请等待其完成后再试')
     } else {
       showToast(e.message || '提交失败', 'error')
     }

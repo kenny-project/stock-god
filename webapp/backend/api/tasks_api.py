@@ -54,6 +54,15 @@ async def create_task(body: TaskCreate, db: Session = Depends(get_db)):
         params["file"] = os.path.basename(f.local_path)
     dup = db.scalar(select(Task).where(Task.stock_id == stock.id, Task.task_type == body.task_type,
                                        Task.status.in_(("pending", "running"))))
+    if body.task_type == "analysis" and params.get("file"):
+        # 单文件行任务可与同股其他行的任务并行（executor 并发 2，单文件互不冲突）：
+        # 仅当已有整股任务（无 file，覆盖面重叠）或同一文件的任务在排队/执行时才拒绝
+        pend = db.scalars(select(Task).where(
+            Task.stock_id == stock.id, Task.task_type == "analysis",
+            Task.status.in_(("pending", "running")))).all()
+        dup = next((t for t in pend
+                    if not (t.params or {}).get("file")
+                    or (t.params or {}).get("file") == params["file"]), None)
     if dup:
         state = "排队" if dup.status == "pending" else "执行"
         raise HTTPException(409, f"同类型任务已在{state}中 (task #{dup.id})")
