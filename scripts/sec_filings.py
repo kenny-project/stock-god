@@ -204,11 +204,18 @@ def group_filings_by_fiscal_year(forms, filing_dates, report_dates, years=5, inc
         latest = max(quarterly_idx, key=lambda i: report_dates[i])
     fy_end_month = int(report_dates[latest][5:7])
     latest_fy = int(report_dates[latest][:4])
-    target_years = set(range(latest_fy - years + 1, latest_fy + 1))
 
     def _fy(report_date):
         y, m = int(report_date[:4]), int(report_date[5:7])
         return y if m <= fy_end_month else y + 1
+
+    # 窗口下限锚定最新年报财年，上限取最新申报财报（含季报）的财年：
+    # 下一份年报申报之前，当前财年的季报会陆续出台，不能被年报锚点封顶漏掉
+    # （如 AVGO 最新 10-K 为 FY2025 时，FY2026 的 10-Q 也要能下载）
+    included = [i for i, form in enumerate(forms)
+                if form in include_forms and i < len(report_dates) and report_dates[i]]
+    newest_fy = max((_fy(report_dates[i]) for i in included), default=latest_fy)
+    target_years = set(range(latest_fy - years + 1, newest_fy + 1))
 
     groups = {}
     for i, form in enumerate(forms):

@@ -59,14 +59,14 @@ class TestFiscalYearGrouping(unittest.TestCase):
     def test_msft_style_fy_june(self):
         """MSFT 财年止于 6 月：FY2022 Q1 于 2021-09 申报、period 2021-09-30，
         应归入 FY2022 而非被申报年窗口漏掉"""
-        # 窗口 FY2022..FY2026（锚定最新年报 FY2026；FY2027 季报已申报但年报未出，
-        # 不属于 5 年窗口）
+        # 窗口 FY2022..FY2027（下限锚定最新年报 FY2026，上限取最新季报财年
+        # FY2027——年报未出但季报已申报的当前财年不能被漏掉）
         forms = (["10-Q", "10-Q", "10-Q", "10-K"]    # FY2022: Q1(2021-09-30)...10-K(2022-06-30)
                  + ["10-Q", "10-Q", "10-Q", "10-K"]   # FY2023
                  + ["10-Q", "10-Q", "10-Q", "10-K"]   # FY2024
                  + ["10-Q", "10-Q", "10-Q", "10-K"]   # FY2025
                  + ["10-Q", "10-Q", "10-Q", "10-K"]   # FY2026
-                 + ["10-Q"])                          # FY2027 Q1（窗口外）
+                 + ["10-Q"])                          # FY2027 Q1（当前财年，须在窗口内）
         report = ["2021-09-30", "2021-12-31", "2022-03-31", "2022-06-30",
                   "2022-09-30", "2022-12-31", "2023-03-31", "2023-06-30",
                   "2023-09-30", "2023-12-31", "2024-03-31", "2024-06-30",
@@ -75,11 +75,30 @@ class TestFiscalYearGrouping(unittest.TestCase):
                   "2026-09-30"]
         filing = report  # 简化：申报日=期末日
         groups = group_filings_by_fiscal_year(forms, filing, report, years=5)
-        self.assertEqual(sorted(groups.keys()), [2022, 2023, 2024, 2025, 2026])
+        self.assertEqual(sorted(groups.keys()), [2022, 2023, 2024, 2025, 2026, 2027])
         for fy, idx in groups.items():
+            if fy == 2027:  # 当前财年季报陆续申报中，年报未出
+                self.assertEqual(groups[2027], [20])
+                continue
             n_annual = sum(1 for i in idx if forms[i] in ANNUAL_FORMS)
             self.assertEqual(n_annual, 1, f"FY{fy} 应恰有 1 份年报")
             self.assertEqual(len(idx), 4, f"FY{fy} 应恰有 4 份财报")
+
+    def test_current_fy_quarters_before_next_10k(self):
+        """AVGO 回归：最新 10-K 为 FY2025（period 2025-11-02）时，FY2026 的
+        10-Q 已陆续申报但年报未出——不得被年报锚点封顶漏掉（此前
+        FY2026 季报全部落在窗口外，导致 2026 年财报永远下载不到）"""
+        forms = (["10-Q", "10-Q", "10-Q", "10-K"]    # FY2024
+                 + ["10-Q", "10-Q", "10-Q", "10-K"]   # FY2025（锚定年报 period 2025-11-02）
+                 + ["10-Q", "10-Q", "10-Q"])          # FY2026 Q1-Q3（修复前窗口外）
+        report = ["2024-02-04", "2024-05-05", "2024-08-04", "2024-11-03",
+                  "2025-02-02", "2025-05-04", "2025-08-03", "2025-11-02",
+                  "2026-02-01", "2026-05-03", "2026-08-02"]
+        groups = group_filings_by_fiscal_year(forms, report, report, years=5)
+        self.assertEqual(sorted(groups.keys()), [2024, 2025, 2026])
+        fy2026 = groups[2026]
+        self.assertEqual(len(fy2026), 3)
+        self.assertTrue(all(forms[i] == "10-Q" for i in fy2026))  # 全是季报，无年报
 
     def test_pfe_fy2021_10k_excluded(self):
         """PFE 财年止于 12 月：窗口 FY2022..FY2026 时，FY2021 年报

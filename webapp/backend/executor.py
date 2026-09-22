@@ -8,6 +8,7 @@ from sqlalchemy import select
 import services.register as register
 from db import ROOT
 from models import Task
+from services.form_fix import fix_unknown_filings
 from services.progress import DownloadProgressTracker, parse_download_progress
 from services.runners import build_command, classify_error
 
@@ -118,6 +119,15 @@ class TaskExecutor:
                 if proc.returncode == 0:
                     registered = getattr(register, _REGISTER[task.task_type])(session, task.stock) \
                         if task.stock else 0
+                    if task.task_type == "download" and task.stock:
+                        # 下载产物文件名多不含 form token（如 avgo-20260201.htm），
+                        # register 落 UNKNOWN；用 submissions API 按 reportDate 回填。
+                        # 幂等，且会顺带清理存量 UNKNOWN；失败不阻塞任务成功
+                        try:
+                            fix_unknown_filings(session)
+                        except Exception as e:  # noqa: BLE001 网络等异常只记日志
+                            with open(log_path, "ab") as log_fh:
+                                log_fh.write(f"[form_fix] 回填失败: {e}\n".encode("utf-8"))
                     if task.stock and registered == 0 and task.task_type != "sync_stocks":
                         if _has_artifacts(task.task_type, task.stock):
                             # 幂等重跑：产物此前已登记，只是本次无新增，视为成功
