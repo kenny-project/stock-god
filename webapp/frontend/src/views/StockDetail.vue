@@ -72,14 +72,15 @@
             <td class="file-links">
               <a :href="'/api/filings/' + f.id + '/file'" target="_blank">打开</a>
               <a :href="'/api/filings/' + f.id + '/file?download=1'">下载</a>
-              <!-- 行内三态按钮：财报打开（该行已有最新版分析）/ 财报更新（旧版，强制重生成）/
-                   财报分析（未生成）；生成/更新完成后自动在新页面打开该行财报的分析 -->
+              <!-- 行内三态按钮：财报打开（该行已有最新版分析，点击新页面打开）/
+                   财报更新（旧版，强制重生成）/ 生成分析（未生成）；
+                   生成/更新完成后只刷新列表并提示，不自动打开 -->
               <button v-if="rowState(f) !== 'none'" class="link-btn"
                       :class="{ warn: rowState(f) === 'update' }"
                       :disabled="rowBusyId === f.id"
                       :title="rowTitle(rowState(f))"
                       @click="openRowAnalysis(f)">
-                {{ rowBusyId === f.id ? '生成中…' : rowState(f) === 'open' ? '财报打开' : rowState(f) === 'update' ? '财报更新' : '财报分析' }}
+                {{ rowBusyId === f.id ? '生成中…' : rowState(f) === 'open' ? '财报打开' : rowState(f) === 'update' ? '财报更新' : '生成分析' }}
               </button>
             </td>
           </tr>
@@ -354,14 +355,13 @@ function rowState(f) {
 }
 
 function rowTitle(state) {
-  return state === 'update' ? '该行分析为旧版生成器产物，点击重新生成后打开'
-       : state === 'generate' ? '该行财报尚未生成分析，点击生成后打开'
+  return state === 'update' ? '该行分析为旧版生成器产物，点击重新生成（完成后刷新列表）'
+       : state === 'generate' ? '该行财报尚未生成分析，点击生成（完成后刷新列表）'
        : '打开该行财报的分析（新页面）'
 }
 
 // 行内按钮点击：open 直接开新页面；generate/update 先创建分析任务（update 带
-// --force 重生成旧版产物），轮询任务终态后刷新分析列表、按 filing_id 找到该行的
-// 分析再开新页面
+// --force 重生成旧版产物），轮询任务终态后刷新分析列表并提示完成，不自动打开
 async function openRowAnalysis(f) {
   const state = rowState(f)
   if (state === 'none' || rowBusyId.value != null) return
@@ -373,14 +373,14 @@ async function openRowAnalysis(f) {
   try {
     const task = await api.createTask('analysis', props.ticker,
                                       state === 'update' ? { force: true } : {})
-    showToast(`分析任务 #${task.id} 已提交，生成完成后自动打开`)
-    await finishRowAnalysis(f, task.id)
+    showToast(`分析任务 #${task.id} 已提交，生成完成后自动刷新`)
+    await finishRowAnalysis(state, task.id)
   } catch (e) {
-    // 409 = 同类型任务已在排队/执行中：提示后轮询该任务，完成仍自动打开
+    // 409 = 同类型任务已在排队/执行中：提示后轮询该任务，完成仍刷新列表
     if (e.status === 409) {
       const dup = e.message.match(/#(\d+)/)
-      showToast('已有分析任务进行中，等待其完成后打开')
-      if (dup) await finishRowAnalysis(f, Number(dup[1]))
+      showToast('已有分析任务进行中，等待其完成后刷新')
+      if (dup) await finishRowAnalysis(state, Number(dup[1]))
     } else {
       showToast(e.message || '提交失败', 'error')
     }
@@ -389,18 +389,12 @@ async function openRowAnalysis(f) {
   }
 }
 
-// 等任务终态后刷新分析列表、按 filing_id 找到该行的分析并打开新页面
-async function finishRowAnalysis(f, taskId) {
+// 等任务终态后刷新分析列表并提示完成（不打开新页面）
+async function finishRowAnalysis(state, taskId) {
   if (!(await waitTaskDone(taskId))) return
   try {
-    const fresh = await api.analyses(props.ticker)
-    analyses.value = fresh
-    const a = fresh.find((x) => x.filing_id === f.id)
-    if (a) {
-      window.open(`/stocks/${props.ticker}/analysis/${a.id}`, '_blank')
-    } else {
-      showToast('任务完成但该行财报未配到分析记录，请刷新后重试', 'error')
-    }
+    analyses.value = await api.analyses(props.ticker)
+    showToast(state === 'update' ? '更新完成' : '生成完成')
   } catch (e) {
     showToast(e.message || '刷新分析列表失败', 'error')
   }
