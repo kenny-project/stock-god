@@ -203,7 +203,7 @@ const deletingDcfId = ref(null) // 删除请求进行中的 DCF 行 id，防连�
 const dcfForm = reactive({ growth: '', discount: '', years: '', safety: '' })
 const curVersions = ref(null) // 当前生成器版本（/api/versions，加载时取一次），用于旧版徽标
 const message = ref(''), messageType = ref('success')
-let toastTimer, pollTimer, seq = 0
+let toastTimer, pollTimer, seq = 0, finSeq = 0 // finSeq：financials 请求专用守卫（seq 会被 loadAnalysis/loadDcf 推进，不能复用）
 
 const TASK_LABELS = { download: '下载财报', analysis: '生成分析', dcf: 'DCF 估值' }
 const taskLabel = (t) => TASK_LABELS[t] || t
@@ -271,7 +271,10 @@ function buildMetricsSeries(list) {
 
 async function loadAll() {
   const my = ++seq
-  finLoading.value = true
+  // 财报数据独立请求（并行 + 专用 finSeq 守卫）：不能放在 loadAll 尾部复用 seq——
+  // 主 try 内 await loadAnalysis / loadDcf 会推进同一 seq，尾部 my===seq 永假，
+  // fin 永不赋值、finLoading 永真 → Tab 永远卡「加载中…」
+  loadFinancials()
   try {
     const [stock, aList, dList] = await Promise.all([
       api.stock(props.ticker), api.analyses(props.ticker), api.dcf(props.ticker),
@@ -299,14 +302,19 @@ async function loadAll() {
   } catch (e) {
     if (my === seq) showToast('加载失败', 'error')
   }
-  // 财报数据独立请求：失败只降级该 Tab（空态提示），不拖累详情页其余数据
+}
+
+// 财报数据独立加载：失败只降级该 Tab（空态提示），不拖累详情页其余数据
+async function loadFinancials() {
+  const fmy = ++finSeq
+  finLoading.value = true
   try {
     const finData = await api.financials(props.ticker)
-    if (my === seq) fin.value = finData
+    if (fmy === finSeq) fin.value = finData
   } catch { /* financials 失败静默：Tab 显示空态 */ } finally {
     // finLoading 随 financials 请求结束：主请求先返回时不能提前关 loading，
     // 否则财报表闪现误导性空态
-    if (my === seq) finLoading.value = false
+    if (fmy === finSeq) finLoading.value = false
   }
 }
 
