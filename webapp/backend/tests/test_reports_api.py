@@ -483,3 +483,102 @@ async def test_clear_analyses_conflict_409(env):
             s.commit()
         r2 = await c.delete("/api/stocks/NKE/analyses")
         assert r2.status_code == 200 and r2.json() == {"deleted": 1}
+
+
+# ---------- analysis-status（财报 Tab 三态按钮） ----------
+
+def _seed_matched_analysis(s, st, version="v2"):
+    """补一份 10-K filing 与 fixture 已有的 10-K FY2025 分析配对，并按需改其版本号。"""
+    from models import Filing, Analysis
+    s.add(Filing(stock_id=st.id, form_type="10-K", period="2025-08-31",
+                 local_path="reports/sec_filings/NKE/nke-20250831.htm"))
+    s.query(Analysis).filter(Analysis.stock_id == st.id,
+                             Analysis.form_type == "10-K").update(
+        {"generator_version": version}, synchronize_session=False)
+    s.commit()
+
+
+async def test_analysis_status_none(env):
+    """无任何 filing → none（按钮隐藏）。"""
+    client, Factory, _ = env
+    with Factory() as s:
+        from models import Stock, Filing
+        st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+        for f in s.scalars(select(Filing).where(Filing.stock_id == st.id)).all():
+            s.delete(f)
+        s.commit()
+    async with client as c:
+        r = await c.get("/api/stocks/NKE/analysis-status")
+        assert r.status_code == 200
+        assert r.json() == {"state": "none", "analysis_id": None, "period": None}
+
+
+async def test_analysis_status_generate_unanalyzed(env):
+    """filing 存在但无配对分析 → generate；UNKNOWN filing 不参与判定（永无对应 analysis）。"""
+    client, Factory, _ = env
+    with Factory() as s:
+        from models import Stock, Filing
+        st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+        # 10-Q 组零分析 → 该组最新财报未生成（fixture 分析全是 10-K，不参与 10-Q 组）
+        s.add(Filing(stock_id=st.id, form_type="10-Q", period="2026-02-28",
+                     local_path="reports/sec_filings/NKE/nke-20260228.htm"))
+        s.commit()
+    async with client as c:
+        r = await c.get("/api/stocks/NKE/analysis-status")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["state"] == "generate"
+        assert body["analysis_id"] is None
+        assert body["period"] == "2026-02-28"
+
+
+async def test_analysis_status_open_fresh(env):
+    """最新 filing 已有最新版（v2）分析 → open。"""
+    client, Factory, _ = env
+    with Factory() as s:
+        from models import Stock
+        st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+        _seed_matched_analysis(s, st, version="v2")
+    async with client as c:
+        r = await c.get("/api/stocks/NKE/analysis-status")
+        body = r.json()
+        assert body["state"] == "open"
+        assert body["period"] == "2025-08-31"
+        assert body["analysis_id"] is not None
+
+
+async def test_analysis_status_update_legacy(env):
+    """分析为 legacy（无版本号）/旧版本号 → update。"""
+    client, Factory, _ = env
+    with Factory() as s:
+        from models import Stock
+        st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+        _seed_matched_analysis(s, st, version=None)  # 无版本号 → legacy
+    async with client as c:
+        r = await c.get("/api/stocks/NKE/analysis-status")
+        assert r.json()["state"] == "update"
+        with Factory() as s:
+            from models import Stock, Analysis
+            st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+            for a in s.scalars(select(Analysis).where(Analysis.stock_id == st.id)).all():
+                a.generator_version = "v1"  # 旧版本号同样判 update
+            s.commit()
+        r2 = await c.get("/api/stocks/NKE/analysis-status")
+        assert r2.json()["state"] == "update"
+
+
+async def test_analysis_status_generate_new_filing(env):
+    """新下载的 filing 尚未分析（组内 filings > analyses）→ generate，不得尾部错配误报 open。"""
+    client, Factory, _ = env
+    with Factory() as s:
+        from models import Stock, Filing
+        st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+        _seed_matched_analysis(s, st, version="v2")
+        s.add(Filing(stock_id=st.id, form_type="10-K", period="2026-08-31",
+                     local_path="reports/sec_filings/NKE/nke-20260831.htm"))
+        s.commit()
+    async with client as c:
+        r = await c.get("/api/stocks/NKE/analysis-status")
+        body = r.json()
+        assert body["state"] == "generate"
+        assert body["period"] == "2026-08-31"

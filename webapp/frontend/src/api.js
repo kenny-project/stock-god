@@ -20,6 +20,7 @@ export const api = {
   analyses: (t) => req(`/api/stocks/${t}/analyses`),
   financials: (t) => req(`/api/stocks/${t}/financials`),
   analysis: (t, id) => req(`/api/stocks/${t}/analyses/${id}`),
+  analysisStatus: (t) => req(`/api/stocks/${t}/analysis-status`),
   clearAnalyses: (t) => req(`/api/stocks/${t}/analyses`, { method: 'DELETE' }),
   dcf: (t) => req(`/api/stocks/${t}/dcf`),
   dcfOne: (t, id) => req(`/api/stocks/${t}/dcf/${id}`),

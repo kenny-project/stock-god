@@ -17,6 +17,14 @@
 
     <div class="actions">
       <button class="btn" @click="submit('download', { years: 5 })">下载财报</button>
+      <!-- 三态按钮：open=财报打开（最新版分析已就绪）/ update=财报更新（旧版产物，点击强制重生成）/
+           generate=财报分析（未生成，点击生成后自动打开）。生成/更新完成后打开新页面 -->
+      <button v-if="asState !== 'none'" class="btn" :class="{ warn: asState === 'update' }"
+              :disabled="asBusy" :title="asState === 'update' ? '分析为旧版生成器产物，点击重新生成后打开'
+                                        : asState === 'generate' ? '最新财报尚未生成分析，点击生成后打开' : '打开财报分析（新页面）'"
+              @click="openOrGenerateAnalysis">
+        {{ asBusy ? '生成中…' : asState === 'open' ? '财报打开' : asState === 'update' ? '财报更新' : '财报分析' }}
+      </button>
       <button class="btn" @click="submit('analysis', {})">生成分析</button>
       <button class="btn" :disabled="!analyses.length || clearing" @click="clearAllAnalyses">清空分析</button>
       <button class="btn" @click="openDcf">DCF 估值</button>
@@ -213,6 +221,8 @@ const clearing = ref(false) // 清空分析请求进行中，防连点
 const deletingDcfId = ref(null) // 删除请求进行中的 DCF 行 id，防连点
 const dcfForm = reactive({ growth: '', discount: '', years: '', safety: '' })
 const curVersions = ref(null) // 当前生成器版本（/api/versions，加载时取一次），用于旧版徽标
+const analysisStatus = ref(null) // 三态按钮：{state: open|update|generate|none, analysis_id, period}
+const asBusy = ref(false) // 分析生成等待中（按钮禁用防连点）
 const message = ref(''), messageType = ref('success')
 let toastTimer, pollTimer, seq = 0, finSeq = 0 // finSeq：financials 请求专用守卫（seq 会被 loadAnalysis/loadDcf 推进，不能复用）
 
@@ -297,13 +307,15 @@ async function loadAll() {
   // fin 永不赋值、finLoading 永真 → Tab 永远卡「加载中…」
   loadFinancials()
   try {
-    const [stock, aList, dList] = await Promise.all([
+    const [stock, aList, dList, aStat] = await Promise.all([
       api.stock(props.ticker), api.analyses(props.ticker), api.dcf(props.ticker),
+      api.analysisStatus(props.ticker).catch(() => null), // 状态接口失败只降级按钮（隐藏），不拖累详情
     ])
     if (my !== seq) return
     detail.value = stock
     analyses.value = aList
     dcfList.value = dList
+    analysisStatus.value = aStat
     // 数据刷新不踢出已打开的分析详情：仅当选中的分析不在新列表（被清空/换股）时才重置视图
     if (!aList.some((a) => a.id === activeAnalysisId.value)) {
       analysisMd.value = ''
@@ -322,6 +334,69 @@ async function loadAll() {
     if (dList.length) loadDcf(dList.find((d) => d.valuation) || dList[0])
   } catch (e) {
     if (my === seq) showToast('加载失败', 'error')
+  }
+}
+
+// 三态按钮状态（open/update/generate/none）
+const asState = computed(() => analysisStatus.value?.state || 'none')
+
+// 三态按钮点击：open 直接开新页面；generate/update 先创建分析任务（update 带
+// --force 重新生成旧版产物），轮询任务终态后取最新状态再开新页面
+async function openOrGenerateAnalysis() {
+  const st = analysisStatus.value
+  if (!st || st.state === 'none' || asBusy.value) return
+  if (st.state === 'open') {
+    window.open(`/stocks/${props.ticker}/analysis/${st.analysis_id}`, '_blank')
+    return
+  }
+  asBusy.value = true
+  try {
+    const task = await api.createTask('analysis', props.ticker,
+                                      st.state === 'update' ? { force: true } : {})
+    showToast(`分析任务 #${task.id} 已提交，生成完成后自动打开`)
+    if (!(await waitTaskDone(task.id))) return
+    const fresh = await api.analysisStatus(props.ticker)
+    analysisStatus.value = fresh
+    if (fresh.analysis_id) {
+      window.open(`/stocks/${props.ticker}/analysis/${fresh.analysis_id}`, '_blank')
+    } else {
+      showToast('任务完成但未找到分析记录，请刷新后重试', 'error')
+    }
+  } catch (e) {
+    // 409 = 同类型任务已在排队/执行中：提示后轮询该任务，完成仍自动打开
+    if (e.status === 409) {
+      const dup = e.message.match(/#(\d+)/)
+      showToast('已有分析任务进行中，等待其完成后打开')
+      if (dup && await waitTaskDone(Number(dup[1]))) {
+        const fresh = await api.analysisStatus(props.ticker)
+        analysisStatus.value = fresh
+        if (fresh.analysis_id) window.open(`/stocks/${props.ticker}/analysis/${fresh.analysis_id}`, '_blank')
+      }
+    } else {
+      showToast(e.message || '提交失败', 'error')
+    }
+  } finally {
+    asBusy.value = false
+  }
+}
+
+// 轮询任务直到终态；success 返回 true，failed/cancelled 弹提示并返回 false
+async function waitTaskDone(id) {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 3000))
+    let t
+    try {
+      t = await api.task(id)
+    } catch {
+      showToast('查询任务状态失败', 'error')
+      return false
+    }
+    if (t.status === 'success') return true
+    if (t.status === 'failed') {
+      showToast(`分析任务 #${id} 失败：${t.error_summary || '未知原因'}`, 'error')
+      return false
+    }
+    if (t.status === 'cancelled') return false
   }
 }
 
@@ -502,6 +577,9 @@ onUnmounted(() => { clearInterval(pollTimer); clearTimeout(toastTimer) })
 .analysis-list { max-height: 200px; overflow-y: auto; }
 .item { padding: 8px 12px; border-bottom: 1px solid #eee; }
 .item.active { color: #0366d6; background: #f6f8fa; }
+/* 三态按钮「财报更新」态：橙底提示旧版产物待更新 */
+.actions .btn.warn { background: #fff7ed; border-color: #ea580c; color: #c2410c; }
+.actions .btn.warn:hover:not(:disabled) { background: #ffedd5; }
 .detail-toolbar { display: flex; align-items: center; gap: 12px; padding: 8px 0 12px; }
 .detail-title { font-weight: 600; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
