@@ -8,6 +8,7 @@ from db import ROOT
 from deps import get_db
 from models import Analysis, DcfReport, Filing, Stock, Task
 from schemas import AnalysisOut, DcfOut
+from services.pairing import pair_analyses_to_filings
 from services.quote import get_price
 from services.ttm import compute_ttm
 
@@ -40,24 +41,11 @@ def _get_stock(db: Session, ticker: str) -> Stock:
 def list_analyses(ticker: str, db: Session = Depends(get_db)):
     st = _get_stock(db, ticker)
     analyses = db.scalars(select(Analysis).where(Analysis.stock_id == st.id)).all()
-    # 按 form_type 分组配对 filing.period：双方升序后从最新端（尾部）对齐 zip，
-    # 最长公共尾部一一对应；多出的老分析配不到 period 置 None（不编造日期）。
-    # UNKNOWN 等历史遗留 form_type 的 filing 只与同 form_type 的分析配对。
-    filings: dict[str, list[Filing]] = {}
-    for f in db.scalars(select(Filing).where(Filing.stock_id == st.id)):
-        if f.period is None:
-            continue  # period 未知的 filing 不进配对池：宁缺毋滥，避免静默错位
-        filings.setdefault(f.form_type, []).append(f)
-    for group in filings.values():
-        group.sort(key=lambda f: f.period or "")
-    groups: dict[str, list[Analysis]] = {}
-    for a in analyses:
-        groups.setdefault(a.form_type, []).append(a)
-    for ft, group in groups.items():
-        group.sort(key=lambda a: (a.fiscal_year, a.quarter or ""))
-        for a, f in zip(reversed(group), reversed(filings.get(ft, []))):
-            a.period = f.period  # 临时属性挂 ORM 实例（不落库），供 from_attributes 校验
-            a.filing_id = f.id   # 配对 filing 行 id：财报列表行内三态按钮据此判定
+    filings = db.scalars(select(Filing).where(Filing.stock_id == st.id)).all()
+    # 语义配对：10-Q 按（财年, 季度）、10-K/20-F 按财年从 filing.period 推导精确
+    # 匹配（services/pairing.py）；period/filing_id 临时挂 ORM 实例（不落库），
+    # 供 from_attributes 校验与行内三态按钮判定
+    pair_analyses_to_filings(analyses, filings)
     out = [AnalysisOut.model_validate(a) for a in analyses]
     # period 降序（None 置底），period 相同/None 时按 财年、季度（NULL 同空串）、生成时间 降序
     out.sort(key=lambda x: x.generated_at, reverse=True)

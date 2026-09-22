@@ -292,19 +292,21 @@ async def test_analyses_pairing_extra_filings(env):
 
 
 async def test_analyses_pairing_mixed_forms(env):
-    """多 form_type 各自独立配对；UNKNOWN filing 不参与；年报与季报按 period 降序混排，None 置底。"""
+    """多 form_type 各自配对；UNKNOWN filing 走旧 zip 不与语义分析配对；
+    年报与季报按 period 降序混排，None 置底。
+    财年日历：10-K 期次 5 月 → M=5（财年止 5 月），10-Q 期次据此推（财年, 季度）。"""
     client, Factory, _ = env
     sid = _add_stock(Factory, "MSFT")
     with Factory() as s:
         from models import Filing, Analysis
-        # 10-K：2 分析 ↔ 2 财报（quarter=None 年报）
+        # 10-K：2026-05-31 → FY2026、2025-05-31 → FY2025，与两条分析精确配对
         s.add(Filing(stock_id=sid, form_type="10-K", period="2025-05-31", local_path="f1.htm"))
         s.add(Filing(stock_id=sid, form_type="10-K", period="2026-05-31", local_path="f2.htm"))
         s.add(Analysis(stock_id=sid, form_type="10-K", fiscal_year=2025, local_path="a1.md", metrics={}))
         s.add(Analysis(stock_id=sid, form_type="10-K", fiscal_year=2026, local_path="a2.md", metrics={}))
-        # 10-Q：3 分析 ↔ 2 财报，最老的 2024Q3 置 None
-        s.add(Filing(stock_id=sid, form_type="10-Q", period="2025-08-31", local_path="f3.htm"))
-        s.add(Filing(stock_id=sid, form_type="10-Q", period="2025-11-30", local_path="f4.htm"))
+        # 10-Q：M=5 → 2024-08-31=(FY2025,Q1)、2024-11-30=(FY2025,Q2)，与标签一致
+        s.add(Filing(stock_id=sid, form_type="10-Q", period="2024-08-31", local_path="f3.htm"))
+        s.add(Filing(stock_id=sid, form_type="10-Q", period="2024-11-30", local_path="f4.htm"))
         s.add(Analysis(stock_id=sid, form_type="10-Q", fiscal_year=2024, quarter="2024Q3",
                        local_path="a3.md", metrics={}))
         s.add(Analysis(stock_id=sid, form_type="10-Q", fiscal_year=2025, quarter="2025Q1",
@@ -318,10 +320,43 @@ async def test_analyses_pairing_mixed_forms(env):
         body = (await c.get("/api/stocks/MSFT/analyses")).json()
         assert [(a["form_type"], a["quarter"], a["period"]) for a in body] == [
             ("10-K", None, "2026-05-31"),
-            ("10-Q", "2025Q2", "2025-11-30"),
-            ("10-Q", "2025Q1", "2025-08-31"),
             ("10-K", None, "2025-05-31"),
+            ("10-Q", "2025Q2", "2024-11-30"),
+            ("10-Q", "2025Q1", "2024-08-31"),
             ("10-Q", "2024Q3", None)]
+
+
+async def test_analyses_pairing_avgo_regression(env):
+    """AVGO 错位回归：分析是 filing 的非后缀子集（老分析 + 缺最新季度）时，
+    尾部对齐会把 2021Q1 老分析错配到 2025-02-02 行（M=11 财年）。
+    语义配对后各自精确落位：2021Q1 ↔ 2021-01-31，最新两季无分析配 None。"""
+    client, Factory, _ = env
+    sid = _add_stock(Factory, "AVGO")
+    with Factory() as s:
+        from models import Filing, Analysis
+        # AVGO 真实期次：FY 止 11 月初，Q1 止次年 1/2 月
+        for period in ("2021-01-31", "2021-05-02", "2024-02-04", "2024-05-05", "2024-08-04",
+                       "2025-02-02", "2025-05-04", "2025-08-03"):
+            s.add(Filing(stock_id=sid, form_type="10-Q", period=period,
+                         local_path=f"reports/sec_filings/AVGO/avgo-{period}.htm"))
+        s.add(Filing(stock_id=sid, form_type="10-K", period="2024-11-03",
+                     local_path="reports/sec_filings/AVGO/avgo-20241103.htm"))
+        s.add(Filing(stock_id=sid, form_type="10-K", period="2025-11-02",
+                     local_path="reports/sec_filings/AVGO/avgo-20251102.htm"))
+        # 只生成了 3 条老分析（2021Q1/2024Q2/2024Q3）+ 1 条年报
+        for fy, q in [(2021, "2021Q1"), (2024, "2024Q2"), (2024, "2024Q3")]:
+            s.add(Analysis(stock_id=sid, form_type="10-Q", fiscal_year=fy, quarter=q,
+                           local_path=f"reports/sec_analysis/AVGO/10-Q_{q}.md", metrics={}))
+        s.add(Analysis(stock_id=sid, form_type="10-K", fiscal_year=2025,
+                       local_path="reports/sec_analysis/AVGO/10-K_FY2025.md", metrics={}))
+        s.commit()
+    async with client as c:
+        body = (await c.get("/api/stocks/AVGO/analyses")).json()
+        got = {a["quarter"] or f'FY{a["fiscal_year"]}': a["period"] for a in body}
+        assert got == {"2021Q1": "2021-01-31",   # 旧实现错配到 2025-02-02
+                       "2024Q2": "2024-05-05",
+                       "2024Q3": "2024-08-04",
+                       "FY2025": "2025-11-02"}
 
 
 async def test_clear_analyses(env, tmp_path, monkeypatch):
