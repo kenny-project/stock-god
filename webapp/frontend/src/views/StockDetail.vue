@@ -232,10 +232,10 @@ const hasFinData = computed(() => !!fin.value && fin.value.columns.length > 0)
 const fmtYi = (v) => (v == null ? '-' : (v / 100).toLocaleString('zh-CN', { minimumFractionDigits: 1, maximumFractionDigits: 1 }))
 // 通用数字：一位小数千分位（股数等）
 const fmtNum = (v) => (v == null ? '-' : v.toLocaleString('zh-CN', { minimumFractionDigits: 1, maximumFractionDigits: 1 }))
-// 表格单元格：money_yi 已是亿$、ratio 带百分号、eps 带 $；缺数据显示 -（不编造）
+// 表格单元格：money_yi 后端已折算成亿$，直接千分位展示（不得再 ÷100）；ratio 带百分号、eps 带 $；缺数据显示 -（不编造）
 function fmtFin(v, type) {
   if (v == null) return '-'
-  if (type === 'money_yi') return fmtYi(v)
+  if (type === 'money_yi') return fmtNum(v)
   if (type === 'ratio') return `${v}%`
   if (type === 'eps') return `$${v}`
   return v
@@ -298,14 +298,16 @@ async function loadAll() {
     if (dList.length) loadDcf(dList.find((d) => d.valuation) || dList[0])
   } catch (e) {
     if (my === seq) showToast('加载失败', 'error')
-  } finally {
-    if (my === seq) finLoading.value = false
   }
   // 财报数据独立请求：失败只降级该 Tab（空态提示），不拖累详情页其余数据
   try {
     const finData = await api.financials(props.ticker)
     if (my === seq) fin.value = finData
-  } catch { /* financials 失败静默：Tab 显示空态 */ }
+  } catch { /* financials 失败静默：Tab 显示空态 */ } finally {
+    // finLoading 随 financials 请求结束：主请求先返回时不能提前关 loading，
+    // 否则财报表闪现误导性空态
+    if (my === seq) finLoading.value = false
+  }
 }
 
 async function loadAnalysis(a) {

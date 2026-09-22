@@ -121,10 +121,24 @@ def financials(ticker: str, db: Session = Depends(get_db)):
                      key=lambda a: a.fiscal_year, reverse=True)
     quarters = sorted((a for a in analyses if a.quarter is not None),
                       key=lambda a: (a.fiscal_year, a.quarter or ""), reverse=True)
-    columns = ([{"kind": "annual", "label": f"FY{a.fiscal_year}", "analysis_id": a.id}
+    columns = ([{"kind": "annual", "label": f"FY{a.fiscal_year}", "form_type": a.form_type, "analysis_id": a.id}
                 for a in annuals]
-               + [{"kind": "quarter", "label": a.quarter, "analysis_id": a.id}
+               + [{"kind": "quarter", "label": a.quarter, "form_type": a.form_type, "analysis_id": a.id}
                   for a in quarters[:_QUARTER_COLUMNS]])
+    # 同一 FY 存在 10-K/20-F 等多条年报（或同季度双 form）时 label 会重复，
+    # 导致 rows[].values 的键互相覆盖 + 前端 :key 冲突：后续重复项追加 form_type 消歧。
+    # 必须先定稿 columns 再填 values，保证 values 键与最终 label 一致。
+    seen_labels: set[str] = set()
+    for c in columns:
+        label = c["label"]
+        if label in seen_labels:
+            label = f'{label} ({c["form_type"]})'
+            n = 2
+            while label in seen_labels:  # 同 FY 同 form_type 重复的极端兜底
+                label = f'{c["label"]} ({c["form_type"]}){n}'
+                n += 1
+        c["label"] = label
+        seen_labels.add(label)
     by_id = {a.id: a for a in analyses}
     rows = []
     for key, label, typ, metric_key in _FIN_ROWS:

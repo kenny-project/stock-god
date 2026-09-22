@@ -167,6 +167,31 @@ async def test_financials_empty_stock(env):
         assert body["price"] is None
 
 
+async def test_financials_duplicate_fy_labels(env):
+    """同 FY 双 form（10-K + 20-F 两条年报）→ 第二条 label 追加 form_type 消歧，
+    columns 无重复 label（前端 :key 不冲突），rows[].values 键不互相覆盖。"""
+    client, Factory = env
+    with Factory() as s:
+        st = Stock(ticker="DUAL", market="US")
+        s.add(st)
+        s.flush()
+        s.add(Analysis(stock_id=st.id, form_type="10-K", fiscal_year=2025,
+                       local_path="reports/sec_analysis/DUAL/10-K_FY2025.md",
+                       metrics=_m(营收=41616.0)))
+        s.add(Analysis(stock_id=st.id, form_type="20-F", fiscal_year=2025,
+                       local_path="reports/sec_analysis/DUAL/20-F_FY2025.md",
+                       metrics=_m(营收=12300.0)))
+        s.commit()
+    async with client as c:
+        body = (await c.get("/api/stocks/DUAL/financials")).json()
+        labels = [col["label"] for col in body["columns"]]
+        assert sorted(labels) == ["FY2025", "FY2025 (20-F)"]
+        assert len(set(labels)) == len(labels)  # label 全局唯一
+        revenue = body["rows"][0]["values"]
+        # 两条记录各自成列：M÷100 一位小数，键不互相覆盖
+        assert sorted(v for v in revenue.values() if v is not None) == [123.0, 416.2]
+
+
 async def test_financials_404(env):
     client, _ = env
     async with client as c:
