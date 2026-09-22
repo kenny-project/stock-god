@@ -57,6 +57,7 @@ def list_analyses(ticker: str, db: Session = Depends(get_db)):
         group.sort(key=lambda a: (a.fiscal_year, a.quarter or ""))
         for a, f in zip(reversed(group), reversed(filings.get(ft, []))):
             a.period = f.period  # 临时属性挂 ORM 实例（不落库），供 from_attributes 校验
+            a.filing_id = f.id   # 配对 filing 行 id：财报列表行内三态按钮据此判定
     out = [AnalysisOut.model_validate(a) for a in analyses]
     # period 降序（None 置底），period 相同/None 时按 财年、季度（NULL 同空串）、生成时间 降序
     out.sort(key=lambda x: x.generated_at, reverse=True)
@@ -88,53 +89,6 @@ def clear_analyses(ticker: str, db: Session = Depends(get_db)):
     db.execute(delete(Analysis).where(Analysis.stock_id == st.id))
     db.commit()
     return {"deleted": len(analyses)}
-
-
-@router.get("/stocks/{ticker}/analysis-status")
-def analysis_status(ticker: str, db: Session = Depends(get_db)):
-    """财报 Tab 三态按钮：open=最新财报已有最新版分析 / update=有但旧版生成器产物 /
-    generate=最新财报未生成分析 / none=无可分析财报（无 filing）。
-
-    配对口径与 list_analyses 一致（form_type 分组、期序尾部对齐），但先按组建模
-    数量判断：filings 多于 analyses 说明最新财报尚未生成（否则尾部对齐会把新
-    filing 错配到旧 analysis 误报 open）。
-    """
-    from services.dataversion import ANALYSIS_VERSION
-    st = _get_stock(db, ticker)
-    analyses = db.scalars(select(Analysis).where(Analysis.stock_id == st.id)).all()
-    filings: dict[str, list[Filing]] = {}
-    for f in db.scalars(select(Filing).where(Filing.stock_id == st.id)):
-        if f.period is None:
-            continue  # period 未知的 filing 不参与（与 list_analyses 配对池一致）
-        if f.form_type == "UNKNOWN":
-            continue  # UNKNOWN 永远不会有对应 form_type 的 analysis，参与判定会永报 generate
-        filings.setdefault(f.form_type, []).append(f)
-    for group in filings.values():
-        group.sort(key=lambda f: f.period or "")
-    groups: dict[str, list[Analysis]] = {}
-    for a in analyses:
-        groups.setdefault(a.form_type, []).append(a)
-    for group in groups.values():
-        group.sort(key=lambda a: (a.fiscal_year, a.quarter or ""))
-
-    if not filings:
-        return {"state": "none", "analysis_id": None, "period": None}
-    latest_f = max((f for g in filings.values() for f in g),
-                   key=lambda f: f.period or "")
-    # 某组建模数 < filing 数 → 该组最新财报未生成（分析按期顺序产出，缺的是最新的）
-    if any(len(fs) > len(groups.get(ft, [])) for ft, fs in filings.items()):
-        return {"state": "generate", "analysis_id": None, "period": latest_f.period}
-    paired = None
-    for a, f in zip(reversed(groups.get(latest_f.form_type, [])),
-                    reversed(filings[latest_f.form_type])):
-        if f.id == latest_f.id:
-            paired = a
-            break
-    if paired is None:
-        return {"state": "generate", "analysis_id": None, "period": latest_f.period}
-    stale = paired.generator_version is None or paired.generator_version != ANALYSIS_VERSION
-    return {"state": "update" if stale else "open",
-            "analysis_id": paired.id, "period": latest_f.period}
 
 
 # 财报数据 Tab 指标行：固定 12 行顺序（key, 展示名, 类型, metrics 中文键）；
