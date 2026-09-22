@@ -119,26 +119,37 @@
             </tr>
           </tbody>
         </table>
-        <!-- DCF 基期信息：OE 三成分推导 + 股数/现价（单位：亿$，DB 存百万 ÷100） -->
+        <!-- DCF 基期信息：三成分明细表 + 每股估值（单位：亿$，DB 存百万 ÷100） -->
         <div class="dcf-base">
-          <h3>DCF 基期信息</h3>
+          <h3>DCF 基期信息<template v-if="fin.ttm">（{{ fin.ttm.base_period }}）</template></h3>
           <template v-if="fin.ttm">
-            <p v-if="fin.ttm.owner_earnings != null" class="oe-line">
-              基期 OE <b>{{ fmtYi(fin.ttm.owner_earnings) }}亿$</b>（{{ fin.ttm.base_period }}）
-              ＝ 净利润 {{ fmtYi(fin.ttm.net_income) }} + 折旧摊销 {{ fmtYi(fin.ttm.depreciation) }}
-              − 维护 CapEx {{ fmtYi(fin.ttm.maintenance_capex) }}（CapEx {{ fmtYi(fin.ttm.capex) }} × 0.6）
-            </p>
-            <p v-else class="oe-line">
-              基期 OE 不可用（{{ fin.ttm.base_period }}）——成分缺失，不编造
-            </p>
-            <p class="muted">{{ fin.ttm.components }}</p>
+            <table class="fin-table ttm-table">
+              <thead><tr><th class="row-label">项目</th><th>金额</th><th class="note-col">说明</th></tr></thead>
+              <tbody>
+                <tr><td class="row-label">净利润</td><td>{{ fmtYi(fin.ttm.net_income) }}</td><td class="note">{{ fin.ttm.notes?.net_income || '-' }}</td></tr>
+                <tr><td class="row-label">折旧摊销</td><td>{{ fmtYi(fin.ttm.depreciation) }}</td><td class="note">{{ fin.ttm.notes?.depreciation || '-' }}</td></tr>
+                <tr><td class="row-label">CapEx</td><td>{{ fmtYi(fin.ttm.capex) }}</td><td class="note">{{ fin.ttm.notes?.capex || '-' }}</td></tr>
+                <tr><td class="row-label">维护 CapEx</td><td>{{ fmtYi(fin.ttm.maintenance_capex) }}</td><td class="note">{{ fin.ttm.notes?.maintenance_capex || '-' }}</td></tr>
+                <tr class="oe-row"><td class="row-label">基期 OE</td><td><b>{{ fmtYi(fin.ttm.owner_earnings) }}</b></td><td class="note">{{ fin.ttm.notes?.owner_earnings || '-' }}</td></tr>
+                <tr><td class="row-label">流通股数</td><td>{{ fin.shares_outstanding != null ? fmtNum(fin.shares_outstanding) + 'M' : '-' }}</td><td class="note">最近一期财报</td></tr>
+              </tbody>
+            </table>
           </template>
           <p v-else class="empty">TTM 基期不可用（缺年报数据）</p>
-          <p class="oe-line">
-            流通股数 {{ fin.shares_outstanding != null ? fmtNum(fin.shares_outstanding) + 'M' : '-' }}
-            <span class="muted">·</span>
-            现价 {{ fin.price != null ? '$' + fin.price : '-' }}
-          </p>
+          <template v-if="latestVal">
+            <h3>每股估值<span class="src">（来自 {{ fmt(latestDcf.generated_at) }} DCF 报告）</span></h3>
+            <table class="fin-table val-table">
+              <thead><tr><th>每股内在价值</th><th>25%安全边际价</th><th>50%安全边际价</th><th>报告现价</th><th>现价 vs 内在价值</th></tr></thead>
+              <tbody><tr>
+                <td><b>{{ latestVal.intrinsic_value_per_share != null ? '$' + latestVal.intrinsic_value_per_share : '-' }}</b></td>
+                <td>{{ latestVal.safety_25_price != null ? '$' + latestVal.safety_25_price : '-' }}</td>
+                <td>{{ latestVal.safety_50_price != null ? '$' + latestVal.safety_50_price : '-' }}</td>
+                <td>{{ latestVal.price != null ? '$' + latestVal.price : '-' }}</td>
+                <td>{{ valPremium }}</td>
+              </tr></tbody>
+            </table>
+          </template>
+          <p v-else class="empty">暂无 DCF 报告，无法给出每股估值</p>
         </div>
         <TrendChart v-if="hasMetrics" :series="metricsSeries" title="营收/净利润趋势（百万$）" />
       </template>
@@ -228,6 +239,16 @@ const sortedFilings = computed(() => {
 const hasMetrics = computed(() => metricsSeries.value.some((s) => s.values.some((v) => v != null)))
 // 财报数据 Tab 有无数据：columns 为空即无分析记录 → 空态提示先生成分析
 const hasFinData = computed(() => !!fin.value && fin.value.columns.length > 0)
+// 每股估值：取最新一条 DCF 报告的 valuation（dcfList 按 generated_at 倒序）
+const latestDcf = computed(() => dcfList.value[0] || null)
+const latestVal = computed(() => latestDcf.value?.valuation || null)
+// 现价相对每股内在价值的溢价/折价（%）
+const valPremium = computed(() => {
+  const v = latestVal.value
+  if (!v || v.price == null || !v.intrinsic_value_per_share) return '-'
+  const p = Math.round((v.price / v.intrinsic_value_per_share - 1) * 1000) / 10
+  return p > 0 ? `溢价 ${p}%` : p < 0 ? `折价 ${-p}%` : '持平'
+})
 // 金额（百万$）→ 亿$，一位小数千分位
 const fmtYi = (v) => (v == null ? '-' : (v / 100).toLocaleString('zh-CN', { minimumFractionDigits: 1, maximumFractionDigits: 1 }))
 // 通用数字：一位小数千分位（股数等）
@@ -515,7 +536,11 @@ onUnmounted(() => { clearInterval(pollTimer); clearTimeout(toastTimer) })
   padding: 12px 16px; margin: 16px 0 4px; background: #fafafa;
 }
 .dcf-base h3 { margin: 0 0 8px; font-size: 14px; }
-.dcf-base .oe-line { margin: 4px 0; font-size: 14px; }
+.dcf-base h3 .src { font-weight: normal; color: #666; font-size: 12px; }
+.dcf-base .ttm-table { margin-bottom: 14px; }
+/* 说明列：左对齐灰字，允许换行（推导串较长） */
+.dcf-base .note { color: #666; font-size: 12px; text-align: left; white-space: normal; min-width: 220px; }
+.dcf-base .oe-row td { background: #f0f7ff; }
 .empty { color: #999; text-align: center; padding: 24px 0; }
 .toast {
   position: fixed; top: 16px; left: 50%; transform: translateX(-50%);

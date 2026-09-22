@@ -49,8 +49,11 @@ def compute_ttm(annual, quarterly):
     无年后季报时回退最新年报基期（与 dcf.py 调用方回退逻辑一致）。
 
     返回 dict（base_period/net_income/depreciation/capex/maintenance_capex/
-    owner_earnings/components）或 None（无年报数据）；capex 一律输出正数
+    owner_earnings/components/notes）或 None（无年报数据）；capex 一律输出正数
     （DB 提取为现金流出负数，与 dcf.py owner_earnings_for_record 同取绝对值）。
+
+    notes: 成分名 → 推导/缺失说明（结构化，供前端基期明细表「说明」列）；
+    components: 全部 notes 拼接串（与人读日志/契约兼容）。
     """
     if not annual or not annual.get("metrics"):
         return None
@@ -70,18 +73,20 @@ def compute_ttm(annual, quarterly):
 
     ttm = {"base_period": None, "net_income": None, "depreciation": None,
            "capex": None, "maintenance_capex": None, "owner_earnings": None,
-           "components": ""}
-    parts = []  # components 推导串的分段
+           "components": "", "notes": {}}
+    notes: dict[str, str] = ttm["notes"]
+    general: list[str] = []  # 非成分专属说明（如回退提示），拼在 components 最前
 
     if not after:
         # 回退最新年报基期：无年后季报时 TTM 公式无成分可加，成分直接取年报值
         ttm["base_period"] = f"最新年报 FY{fy}"
-        parts.append("无年后季报，回退最新年报基期")
+        general.append("无年后季报，回退最新年报基期")
         for key, cn in _METRIC_KEYS:
             if (a_val := m.get(cn)) is not None:
                 ttm[key] = a_val
+                notes[key] = f"{cn} = 年报 {_fmt(a_val)}"
             else:
-                parts.append(f"{cn}：年报缺该科目，置空")
+                notes[key] = f"{cn}：年报缺该科目，置空"
     else:
         ttm["base_period"] = f"TTM 截至 {fy + 1}Q{max(after)}"
         forms = {r.get("form_type") for r in after.values()}
@@ -90,25 +95,25 @@ def compute_ttm(annual, quarterly):
         for key, cn in _METRIC_KEYS:
             a_val = m.get(cn)
             if a_val is None:
-                parts.append(f"{cn}：年报缺该科目，置空")
+                notes[key] = f"{cn}：年报缺该科目，置空"
                 continue
             if key in _CF_METRICS and ytd_ok:
                 # YTD 累计：取期末最新一份与上年同期一份
                 q_latest = max(after)
                 prior_rec = prior.get(q_latest)
                 if prior_rec is None or prior_rec["metrics"].get(cn) is None:
-                    parts.append(f"{cn}：缺上年同期 {_YTD_LABEL[q_latest]}'{fy % 100} "
-                                 f"累计季报，置空")
+                    notes[key] = (f"{cn}：缺上年同期 {_YTD_LABEL[q_latest]}'{fy % 100} "
+                                  f"累计季报，置空")
                     continue
                 after_val = after[q_latest]["metrics"][cn]
                 val = a_val + after_val - prior_rec["metrics"][cn]
                 ttm[key] = val
-                parts.append(f"{cn} = 年报 {_fmt(a_val)} + "
-                             f"{_YTD_LABEL[q_latest]}'{(fy + 1) % 100} 累计 {_fmt(after_val)} − "
-                             f"{_YTD_LABEL[q_latest]}'{fy % 100} 累计 "
-                             f"{_fmt(prior_rec['metrics'][cn])} = {_fmt(val)}")
+                notes[key] = (f"{cn} = 年报 {_fmt(a_val)} + "
+                              f"{_YTD_LABEL[q_latest]}'{(fy + 1) % 100} 累计 {_fmt(after_val)} − "
+                              f"{_YTD_LABEL[q_latest]}'{fy % 100} 累计 "
+                              f"{_fmt(prior_rec['metrics'][cn])} = {_fmt(val)}")
             elif key in _CF_METRICS and not rolling_ok:
-                parts.append(f"{cn}：10-Q/6-K 混合披露，YTD/单季口径不一致，无法推导，置空")
+                notes[key] = f"{cn}：10-Q/6-K 混合披露，YTD/单季口径不一致，无法推导，置空"
             else:
                 # 单季值滚动求和（利润表科目恒走此分支；现金流科目仅全 6-K 时适用）
                 comps = []
@@ -124,12 +129,12 @@ def compute_ttm(annual, quarterly):
                     comps.append((f"{fy + 1}Q{q}", r["metrics"][cn], pv))
                     total += r["metrics"][cn] - pv
                 if total is None:
-                    parts.append(f"{cn}：缺 {missing_q} 或其上年同期季报，无法滚动，置空")
+                    notes[key] = f"{cn}：缺 {missing_q} 或其上年同期季报，无法滚动，置空"
                     continue
                 ttm[key] = total
                 detail = " + ".join(f"{lbl}({_fmt(av)}−{_fmt(pv)})"
                                     for lbl, av, pv in comps)
-                parts.append(f"{cn} = 年报 {_fmt(a_val)} + {detail} = {_fmt(total)}")
+                notes[key] = f"{cn} = 年报 {_fmt(a_val)} + {detail} = {_fmt(total)}"
 
     # 维护性 CapEx 与基期 OE（TTM/年报两条路径共用）
     capex = ttm["capex"]
@@ -138,17 +143,18 @@ def compute_ttm(annual, quarterly):
         maint = capex_abs * _MAINT_CAPEX_RATIO
         ttm["capex"] = capex_abs
         ttm["maintenance_capex"] = round(maint, 1)
-        parts.append(f"维护性 CapEx = CapEx {_fmt(capex_abs)} × "
-                     f"{_MAINT_CAPEX_RATIO} = {_fmt(maint)}")
+        notes["maintenance_capex"] = (f"CapEx {_fmt(capex_abs)} × "
+                                      f"{_MAINT_CAPEX_RATIO} = {_fmt(maint)}")
     else:
-        parts.append("CapEx TTM 缺失，维护性 CapEx 置空")
+        notes["maintenance_capex"] = "CapEx TTM 缺失，置空"
     ni, dep = ttm["net_income"], ttm["depreciation"]
     if ni is not None and dep is not None and ttm["maintenance_capex"] is not None:
         oe = ni + dep - ttm["maintenance_capex"]
         ttm["owner_earnings"] = round(oe, 1)
-        parts.append(f"基期 OE = 净利润 {_fmt(ni)} + 折旧摊销 {_fmt(dep)} − "
-                     f"维护性 CapEx {_fmt(ttm['maintenance_capex'])} = {_fmt(oe)}")
+        notes["owner_earnings"] = (f"净利润 {_fmt(ni)} + 折旧摊销 {_fmt(dep)} − "
+                                   f"维护性 CapEx {_fmt(ttm['maintenance_capex'])} "
+                                   f"= {_fmt(oe)}")
     else:
-        parts.append("净利润/折旧摊销/维护性 CapEx 任一缺失，基期 OE 置空")
-    ttm["components"] = "；".join(parts)
+        notes["owner_earnings"] = "净利润/折旧摊销/维护性 CapEx 任一缺失，基期 OE 置空"
+    ttm["components"] = "；".join(general + list(notes.values()))
     return ttm

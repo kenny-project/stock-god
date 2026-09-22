@@ -66,11 +66,18 @@ def test_only_total_lines():
     assert parse_download_progress(text) == (0, 4)
 
 
-def test_real_task9_log_if_present():
-    """若仓库真实日志存在，用其校验：task_9.log 应解析为 (20, 20)。"""
-    path = os.path.join(REPO_ROOT, "logs", "tasks", "task_9.log")
-    if not os.path.exists(path):
-        return  # 环境无真实日志时跳过（不视为失败）
+def test_real_task9_log_if_present(tmp_path):
+    """文件级冒烟：把历史 task_9.log（AMD 下载，20/20）写入临时文件再解析。
+
+    不直接读仓库 logs/：任务清空后 id 复用会覆盖同名日志，真实文件内容
+    不可作为稳定 fixture（曾致本测试随环境漂移而失败）。
+    """
+    path = tmp_path / "task_9.log"
+    path.write_text(
+        "".join(f"--- FY{y}: 找到 4 份财报 ---\n" + "  ✅ 下载完成\n" * 4
+                for y in (2021, 2022, 2023, 2024, 2025)),
+        encoding="utf-8",
+    )
     with open(path, encoding="utf-8") as fh:
         assert parse_download_progress(fh.read()) == (20, 20)
 
