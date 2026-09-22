@@ -1,7 +1,6 @@
 <template>
   <div class="ad-page">
     <div class="ad-toolbar">
-      <button class="btn" @click="goBack">← 返回个股页</button>
       <h2 class="ad-title">
         {{ meta }}
         <span v-if="stale" class="stale-badge" title="旧版生成器产物，建议回到个股页重新生成分析">旧版数据</span>
@@ -71,10 +70,6 @@ async function loadList() {
 
 function switchAnalysis(e) {
   router.replace(`/stocks/${props.ticker}/analysis/${e.target.value}`)
-}
-
-function goBack() {
-  router.push(`/stocks/${props.ticker}`)
 }
 
 watch(() => props.id, loadContent, { immediate: true })
