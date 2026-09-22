@@ -72,8 +72,8 @@
 - [x] 后端 GET /api/stocks/{ticker}/financials（columns/rows/ttm/shares/price），单测
 - [x] 前端 Tab 重排 + 图表 Tab 移除、TrendChart 移入财报数据 Tab
 - [x] 前端 财报数据 Tab：基础信息表（12 行 × 年报+四季列）、DCF 基础信息段、空态
-- [ ] 评审闭环（spec 合规 + 代码质量）
-- [ ] 重启服务并通知验收
+- [x] 评审闭环（spec 合规 + 代码质量）：修 Critical fmtYi 双重除100、Important 同FY列label消歧（+单测）、Minor finLoading 时序（adde643，148 tests）
+- [x] 重启服务并通知验收
 
 ## 5. 变更记录
 
