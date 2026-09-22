@@ -198,9 +198,41 @@ def test_register_analysis_from_fixture(tmp_path, capsys):
     assert rows["10-Q"].metrics["净利润"] == 21448
     assert rows["10-Q"].metrics["营收"] == 85777
     n2 = register_analysis(s, st, base_dir=str(base))
-    assert n2 == 0  # 二次登记不重复（含季度行）
+    assert n2 == 2  # 二次登记：同键行刷新（不新增行），返回值计入刷新数
+    assert s.scalar(select(func.count(Analysis.id))) == 2
     err = capsys.readouterr().err
     assert "10-K_draft.md" in err and "no fiscal year/quarter" in err
+
+
+def test_register_analysis_refreshes_row_on_overwrite(tmp_path):
+    """--force 覆盖重生成同名文件后再登记：同键 (form, fy, quarter) 行必须刷新
+    metrics/generator_version/generated_at，而不是跳过——否则 DB 停留旧值，
+    前端行内「财报更新」按钮永不消失、财报数据 Tab 用旧数。"""
+    s = _session()
+    st = s.scalar(select(Stock).where(Stock.ticker == "NKE"))
+    base = tmp_path / "reports" / "sec_analysis" / "NKE"
+    base.mkdir(parents=True)
+    target = base / "10-K_FY2024.md"
+    shutil.copy(os.path.join(FIXTURES, "10-K_FY2024.md"), target)
+    assert register_analysis(s, st, base_dir=str(base)) == 1
+    row = s.scalars(select(Analysis)).one()
+    assert row.generator_version is None  # legacy 产物
+    assert row.metrics["营收"] == 51362
+    # 模拟 --force 重生成：覆盖同名文件，换新版内容（v2 版本行 + 新指标值）
+    src = open(os.path.join(FIXTURES, "10-K_FY2024.md"), encoding="utf-8").read()
+    src = src.replace("提取时间:", "生成器版本: analysis-v2\n\n提取时间:", 1)
+    src = src.replace("$51,362M", "$77,777M", 1)
+    target.write_text(src, encoding="utf-8")
+    future = 2000000000
+    os.utime(target, (future, future))
+    # 再登记：不新增行，行内字段被刷新
+    assert register_analysis(s, st, base_dir=str(base)) == 1
+    assert s.scalar(select(func.count(Analysis.id))) == 1
+    s.expire(row)
+    row = s.scalars(select(Analysis)).one()
+    assert row.generator_version == "v2"
+    assert row.generated_at == datetime.fromtimestamp(future)
+    assert row.metrics["营收"] == 77777
 
 
 def test_register_analysis_fy_quarter_variant(tmp_path):

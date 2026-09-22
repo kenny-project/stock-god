@@ -130,7 +130,10 @@ def register_analysis(session, stock, base_dir: str | None = None) -> int:
     base = base_dir or os.path.join(ROOT, "reports", "sec_analysis", stock.ticker)
     if not os.path.isdir(base):
         return 0
-    existing = {(a.form_type, a.fiscal_year, a.quarter)
+    # 键 (form_type, fiscal_year, quarter) → 已登记行。sec_analysis --force 重生成
+    # 是「覆盖同名文件」，若已存在就跳过，DB 的 metrics/生成器版本会永远停留旧值，
+    # 前端行内「财报更新」按钮永不消失——已存在的键必须改为刷新行。
+    existing = {(a.form_type, a.fiscal_year, a.quarter): a
                 for a in session.scalars(select(Analysis).where(Analysis.stock_id == stock.id))}
     n = 0
     for name in sorted(os.listdir(base)):
@@ -152,16 +155,25 @@ def register_analysis(session, stock, base_dir: str | None = None) -> int:
             print(f"[register] skip {name}: no fiscal year/quarter in filename", file=sys.stderr)
             continue
         full = os.path.join(base, name)
-        if not _valid_file(full) or (form, year, quarter) in existing:
+        if not _valid_file(full):
             continue
         with open(full, encoding="utf-8") as f:
             content = f.read()
         metrics = parse_analysis_metrics(content)
         # 头部 `生成器版本: analysis-v2` 行 → "v2"；无该行 → NULL（legacy 旧数据）
-        session.add(Analysis(stock_id=stock.id, form_type=form, fiscal_year=year, quarter=quarter,
-                             local_path=_rel(full), metrics=metrics or None,
-                             generator_version=parse_md_version(content, "analysis")))
-        existing.add((form, year, quarter))
+        version = parse_md_version(content, "analysis")
+        generated_at = datetime.fromtimestamp(os.path.getmtime(full))
+        row = existing.get((form, year, quarter))
+        if row is not None:
+            row.local_path = _rel(full)
+            row.metrics = metrics or None
+            row.generator_version = version
+            row.generated_at = generated_at
+        else:
+            session.add(Analysis(stock_id=stock.id, form_type=form, fiscal_year=year, quarter=quarter,
+                                 local_path=_rel(full), metrics=metrics or None,
+                                 generator_version=version, generated_at=generated_at))
+            existing[(form, year, quarter)] = True
         n += 1
     session.commit()
     return n
