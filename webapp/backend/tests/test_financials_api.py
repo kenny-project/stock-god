@@ -77,11 +77,17 @@ async def test_financials_contract_and_units(env):
         r = await c.get("/api/stocks/QCOM/financials")
         assert r.status_code == 200
         body = r.json()
-        # columns：年报全量（1）+ 最近 4 季，各自倒序；年报在前季度在后
+        # columns：年报全量 + 所有季度（含推算 Q4），各自倒序；年报在前季度在后。
+        # FY2025 10-K + 2025Q1–Q3 齐备 → 推算 2025Q4 入列
         assert [(c["kind"], c["label"]) for c in body["columns"]] == [
             ("annual", "FY2025"), ("quarter", "2026Q3"), ("quarter", "2026Q2"),
-            ("quarter", "2026Q1"), ("quarter", "2025Q3")]
-        assert all(c["analysis_id"] > 0 for c in body["columns"])
+            ("quarter", "2026Q1"), ("quarter", "2025Q4"), ("quarter", "2025Q3"),
+            ("quarter", "2025Q2"), ("quarter", "2025Q1")]
+        # 推算列无 Analysis 行：analysis_id 为 None 且 derived=true；真实列相反
+        assert all(c["analysis_id"] > 0 and not c["derived"]
+                   for c in body["columns"] if c["label"] != "2025Q4")
+        q4col = next(c for c in body["columns"] if c["label"] == "2025Q4")
+        assert q4col["derived"] is True and q4col["analysis_id"] is None
         # rows：12 指标固定顺序
         assert [row["key"] for row in body["rows"]] == [
             "revenue", "net_income", "net_margin", "gross_profit", "gross_margin",
@@ -89,10 +95,10 @@ async def test_financials_contract_and_units(env):
             "debt_ratio", "roe"]
         revenue = body["rows"][0]
         assert revenue["label"] == "营收（亿$）" and revenue["type"] == "money_yi"
-        # money_yi = M ÷100 一位小数：年报 41616M → 416.2亿；2026Q3 9947M → 99.5亿
-        assert revenue["values"]["FY2025"] == 416.2
-        assert revenue["values"]["2026Q3"] == 99.5
-        assert "2025Q2" not in revenue["values"]  # 最近 4 季之外的季度列不存在
+        # money_yi = M ÷100 三位小数：年报 41616M → 416.16亿；2026Q3 9947M → 99.47亿
+        assert revenue["values"]["FY2025"] == 416.16
+        assert revenue["values"]["2026Q3"] == 99.47
+        assert revenue["values"]["2025Q2"] == 109.79  # 所有季度都返回
         # ratio 原值（不除 100）
         net_margin = body["rows"][2]
         assert net_margin["values"]["FY2025"] == 13.3
@@ -109,7 +115,86 @@ async def test_financials_contract_and_units(env):
         body2 = (await c.get("/api/stocks/QCOM/financials")).json()
         ni = body2["rows"][1]
         assert ni["values"]["FY2025"] is None  # 缺数据 → null
-        assert ni["values"]["2026Q3"] == 20.0  # 季度列不受影响（2002/100 一位小数）
+        assert ni["values"]["2026Q3"] == 20.02  # 季度列不受影响（2002/100 三位小数）
+
+
+async def test_financials_derived_q4_and_quarters(env):
+    """Q4 推算口径：利润表科目 = 全年 − Q1−Q2−Q3；FCF = 全年 − Q3 的 YTD 累计值；
+    EPS/ROE 不推算置 null（宁缺毋假）；quarters 为升序全量序列（含推算 Q4）。"""
+    client, Factory = env
+    _seed_qcom(Factory)
+    async with client as c:
+        body = (await c.get("/api/stocks/QCOM/financials")).json()
+        revenue = body["rows"][0]["values"]
+        ni = body["rows"][1]["values"]
+        # 营收 Q4 = 41616 − (11669+10979+10365) = 8603M → 86.03亿
+        assert revenue["2025Q4"] == 86.03
+        # 净利润 Q4 = 5541 − (3180+2812+2666) = −3117M → −31.17亿
+        assert ni["2025Q4"] == -31.17
+        # EPS（各季加权股本不同）/ ROE（全年比率）不推算
+        assert body["rows"][5]["values"]["2025Q4"] is None
+        assert body["rows"][11]["values"]["2025Q4"] is None
+        # quarters 升序全量：真实 Q1–Q3 + 推算 Q4 + 2026 各季
+        labels = [q["label"] for q in body["quarters"]]
+        assert labels == ["2025Q1", "2025Q2", "2025Q3", "2025Q4",
+                          "2026Q1", "2026Q2", "2026Q3"]
+        q4 = body["quarters"][3]
+        assert q4["derived"] is True
+        # 趋势图数据后端已折算为亿（三位小数）
+        assert q4["revenue"] == 86.03 and q4["net_income"] == -31.17
+
+
+async def test_financials_q4_not_derived_when_quarters_incomplete(env):
+    """缺任一季（如仅有 Q1/Q2）→ 不推算 Q4，columns 与 quarters 均无 2025Q4。"""
+    client, Factory = env
+    with Factory() as s:
+        st = Stock(ticker="PART", market="US")
+        s.add(st)
+        s.flush()
+        s.add(Analysis(stock_id=st.id, form_type="10-K", fiscal_year=2025,
+                       local_path="reports/sec_analysis/PART/10-K_FY2025.md",
+                       metrics=_m()))
+        for q in ("2025Q1", "2025Q2"):
+            s.add(Analysis(stock_id=st.id, form_type="10-Q", fiscal_year=2025,
+                           quarter=q, local_path=f"reports/sec_analysis/PART/10-Q_{q}.md",
+                           metrics=_m()))
+        s.commit()
+    async with client as c:
+        body = (await c.get("/api/stocks/PART/financials")).json()
+        assert all(c["label"] != "2025Q4" for c in body["columns"])
+        assert all(q["label"] != "2025Q4" for q in body["quarters"])
+
+
+async def test_financials_fcf_single_quarter(env):
+    """季度列自由现金流转单季口径：DB 存 YTD 累计，Q_i = YTD_i − YTD_(i−1)，
+    Q1 即自身；缺前一季 YTD → null；推算 Q4 = 全年 − Q3 YTD。"""
+    client, Factory = env
+    with Factory() as s:
+        st = Stock(ticker="FCFQ", market="US")
+        s.add(st)
+        s.flush()
+        # 全年 FCF 1000；Q1–Q3 YTD：100 / 350 / 700 → 单季 100 / 250 / 350，Q4 = 300
+        s.add(Analysis(stock_id=st.id, form_type="10-K", fiscal_year=2025,
+                       local_path="reports/sec_analysis/FCFQ/10-K_FY2025.md",
+                       metrics=_m(自由现金流=1000.0)))
+        ytd = {"2025Q1": 100.0, "2025Q2": 350.0, "2025Q3": 700.0}
+        for q, v in ytd.items():
+            s.add(Analysis(stock_id=st.id, form_type="10-Q", fiscal_year=2025,
+                           quarter=q, local_path=f"reports/sec_analysis/FCFQ/10-Q_{q}.md",
+                           metrics=_m(自由现金流=v)))
+        # 2026 只下载 Q3（缺 Q2）→ 2026Q3 无法差分，置 null
+        s.add(Analysis(stock_id=st.id, form_type="10-Q", fiscal_year=2026,
+                       quarter="2026Q3", local_path="reports/sec_analysis/FCFQ/10-Q_2026Q3.md",
+                       metrics=_m(自由现金流=500.0)))
+        s.commit()
+    async with client as c:
+        body = (await c.get("/api/stocks/FCFQ/financials")).json()
+        fcf = next(r for r in body["rows"] if r["key"] == "fcf")["values"]
+        assert fcf["FY2025"] == 10.0       # 年报原值 1000M → 10.0亿
+        assert fcf["2025Q2"] == 2.5        # 350 − 100（Q1 即 YTD 自身 100）
+        assert fcf["2025Q3"] == 3.5        # 700 − 350
+        assert fcf["2025Q4"] == 3.0        # 推算：1000 − 700
+        assert fcf["2026Q3"] is None       # 缺 2026Q2 的 YTD，不编造
 
 
 async def test_financials_ttm_and_shares(env, monkeypatch):
@@ -189,7 +274,25 @@ async def test_financials_duplicate_fy_labels(env):
         assert len(set(labels)) == len(labels)  # label 全局唯一
         revenue = body["rows"][0]["values"]
         # 两条记录各自成列：M÷100 一位小数，键不互相覆盖
-        assert sorted(v for v in revenue.values() if v is not None) == [123.0, 416.2]
+        assert sorted(v for v in revenue.values() if v is not None) == [123.0, 416.16]
+
+
+async def test_financials_quarter_series_in_yi(env):
+    """季度趋势图数据统一用亿展示：后端将百万$ ÷100 三位小数返回。"""
+    client, Factory = env
+    _seed_qcom(Factory)
+    async with client as c:
+        body = (await c.get("/api/stocks/QCOM/financials")).json()
+        labels = [q["label"] for q in body["quarters"]]
+        assert labels == ["2025Q1", "2025Q2", "2025Q3", "2025Q4",
+                          "2026Q1", "2026Q2", "2026Q3"]
+        q4 = body["quarters"][3]
+        assert q4["derived"] is True
+        # 2025Q4 推算：营收 8603M → 86.03亿，净利润 -3117M → -31.17亿
+        assert q4["revenue"] == 86.03
+        assert q4["net_income"] == -31.17
+        # 最近季 2026Q3：营收 9947M → 99.47亿
+        assert body["quarters"][-1]["revenue"] == 99.47
 
 
 async def test_financials_404(env):

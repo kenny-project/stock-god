@@ -95,14 +95,60 @@ _FIN_ROWS = (
     ("debt_ratio", "资产负债率（%）", "ratio", "资产负债率"),
     ("roe", "净资产收益率（%）", "ratio", "净资产收益率"),
 )
-_QUARTER_COLUMNS = 4  # 最近季度列数
+# Q4 推算口径（由 10-Q 提取规则决定，见 scripts/sec_analysis/extraction.py）：
+# - 利润表科目（营收/毛利润/净利润）：10-Q 提取保证单季口径 → Q4 = 全年 − Q1 − Q2 − Q3
+# - 自由现金流：10-Q 存 YTD 累计值 → Q4 = 全年 − Q3 的 YTD 累计值
+# - 期末类科目（现金/总资产/总负债/资产负债率）：10-K 资产负债表即 Q4 期末值，直接沿用
+# - EPS（各季加权股本不同，相减不成立）、ROE（全年比率）不推算，置空 —— 宁缺毋假
+_Q4_FLOW_KEYS = ("营收", "毛利润", "净利润")
+_Q4_LEVEL_KEYS = ("现金及等价物", "总资产", "总负债", "资产负债率")
+
+
+def _derive_q4_metrics(annual: dict, q_metrics: list[dict]) -> dict | None:
+    """由 10-K 全年 + 同财年 Q1–Q3 合成 Q4 指标；利润表三科目任一缺失返回 None（不编造）。"""
+    if any(annual.get(k) is None or any(m.get(k) is None for m in q_metrics)
+           for k in _Q4_FLOW_KEYS):
+        return None
+    q4 = {k: round(annual[k] - sum(m[k] for m in q_metrics), 3) for k in _Q4_FLOW_KEYS}
+    q4["毛利率"] = round(q4["毛利润"] / q4["营收"] * 100, 1) if q4["营收"] else None
+    q4["净利率"] = round(q4["净利润"] / q4["营收"] * 100, 1) if q4["营收"] else None
+    fy_fcf, q3_fcf = annual.get("自由现金流"), q_metrics[-1].get("自由现金流")
+    q4["自由现金流"] = (round(fy_fcf - q3_fcf, 3)
+                        if fy_fcf is not None and q3_fcf is not None else None)
+    for k in _Q4_LEVEL_KEYS:
+        q4[k] = annual.get(k)
+    q4["每股收益"] = None
+    q4["净资产收益率"] = None
+    return q4
+
+
+def _single_quarter_fcf(quarters) -> dict[int, float | None]:
+    """季度列自由现金流转单季口径：DB 存 YTD 累计（10-Q 现金流量表口径），
+    Q_i = YTD_i − YTD_(i−1)，Q1 即自身；缺前一季 YTD → null，不编造。
+    返回 {analysis_id: 单季 FCF}。TTM 计算仍直接用原始 YTD 值，不受影响。"""
+    by_label = {a.quarter: a for a in quarters}
+    out = {}
+    for a in quarters:
+        qn = (a.quarter or "")[-1]
+        ytd = (a.metrics or {}).get("自由现金流")
+        if qn == "1":
+            out[a.id] = ytd
+            continue
+        prev = by_label.get(a.quarter[:-1] + str(int(qn) - 1))
+        prev_ytd = (prev.metrics or {}).get("自由现金流") if prev else None
+        out[a.id] = (round(ytd - prev_ytd, 3)
+                     if ytd is not None and prev_ytd is not None else None)
+    return out
 
 
 @router.get("/stocks/{ticker}/financials")
 def financials(ticker: str, db: Session = Depends(get_db)):
-    """财报数据 Tab：基础信息表（年报全量 + 最近 4 季）+ TTM 基期 + 股数/现价。
+    """财报数据 Tab：基础信息表（年报全量 + 所有季度，含推算 Q4）+ TTM 基期 + 股数/现价。
 
-    现价取腾讯行情，任何异常降级为 null，不阻塞本接口（行情仅展示）。
+    Q4 推算：10-K + 同财年 Q1–Q3 齐备时接口层合成（不落库），列带 derived=true 标记；
+    EPS/ROE 无法精确推算置 null。季度列自由现金流转单季口径（DB 存 YTD 累计）。
+    另返回 quarters 全量季度序列（升序，含推算 Q4，仅 营收/净利润，单位：亿$），供前端季度趋势图。
+    现价取腾讯行情，任何异常降级为 null。
     """
     st = _get_stock(db, ticker)
     analyses = db.scalars(select(Analysis).where(Analysis.stock_id == st.id)).all()
@@ -110,10 +156,40 @@ def financials(ticker: str, db: Session = Depends(get_db)):
                      key=lambda a: a.fiscal_year, reverse=True)
     quarters = sorted((a for a in analyses if a.quarter is not None),
                       key=lambda a: (a.fiscal_year, a.quarter or ""), reverse=True)
-    columns = ([{"kind": "annual", "label": f"FY{a.fiscal_year}", "form_type": a.form_type, "analysis_id": a.id}
+    # Q4 推算（不落库）：10-K + 同财年 Q1–Q3 齐备才推，宁缺毋假
+    by_quarter = {a.quarter: a for a in quarters}
+    derived = []
+    for a in annuals:
+        qms = []
+        for i in (1, 2, 3):
+            q = by_quarter.get(f"{a.fiscal_year}Q{i}")
+            if q is None:
+                qms = []
+                break
+            qms.append(q.metrics or {})
+        if not qms:
+            continue
+        m = _derive_q4_metrics(a.metrics or {}, qms)
+        if m is not None:
+            derived.append({"label": f"{a.fiscal_year}Q4", "form_type": a.form_type,
+                            "metrics": m})
+    # 真实季度 + 推算 Q4 合并按时序排（label 形如 2026Q2，字符串序即时序）；
+    # 真实季度列的自由现金流差分为单季口径（见 _single_quarter_fcf）
+    single_fcf = _single_quarter_fcf(quarters)
+    q_entries = ([{"label": a.quarter, "form_type": a.form_type, "analysis_id": a.id,
+                   "derived": False,
+                   "_m": {**(a.metrics or {}), "自由现金流": single_fcf[a.id]}}
+                  for a in quarters]
+                 + [{"label": d["label"], "form_type": d["form_type"], "analysis_id": None,
+                     "derived": True, "_m": d["metrics"]} for d in derived])
+    q_entries.sort(key=lambda c: c["label"], reverse=True)
+    # columns 挂 _m（推算列无 Analysis 行，rows 直读），响应前剥掉
+    columns = ([{"kind": "annual", "label": f"FY{a.fiscal_year}", "form_type": a.form_type,
+                 "analysis_id": a.id, "derived": False, "_m": a.metrics or {}}
                 for a in annuals]
-               + [{"kind": "quarter", "label": a.quarter, "form_type": a.form_type, "analysis_id": a.id}
-                  for a in quarters[:_QUARTER_COLUMNS]])
+               + [{"kind": "quarter", "label": c["label"], "form_type": c["form_type"],
+                   "analysis_id": c["analysis_id"], "derived": c["derived"], "_m": c["_m"]}
+                  for c in q_entries])
     # 同一 FY 存在 10-K/20-F 等多条年报（或同季度双 form）时 label 会重复，
     # 导致 rows[].values 的键互相覆盖 + 前端 :key 冲突：后续重复项追加 form_type 消歧。
     # 必须先定稿 columns 再填 values，保证 values 键与最终 label 一致。
@@ -128,19 +204,19 @@ def financials(ticker: str, db: Session = Depends(get_db)):
                 n += 1
         c["label"] = label
         seen_labels.add(label)
-    by_id = {a.id: a for a in analyses}
     rows = []
     for key, label, typ, metric_key in _FIN_ROWS:
         values = {}
         for c in columns:
-            v = (by_id[c["analysis_id"]].metrics or {}).get(metric_key)
+            v = c["_m"].get(metric_key)
             if v is None:
                 values[c["label"]] = None
             elif typ == "money_yi":
-                values[c["label"]] = round(v / 100, 1)
+                values[c["label"]] = round(v / 100, 3)
             else:
                 values[c["label"]] = v
         rows.append({"key": key, "label": label, "type": typ, "values": values})
+    out_columns = [{k: v for k, v in c.items() if k != "_m"} for c in columns]
     # TTM 基期：最新年报 + 年后季报（公式与 scripts/dcf.py compute_ttm 同一套，
     # 实现在 services/ttm.py；无年报数据返回 None）
     latest_annual = annuals[0] if annuals else None
@@ -159,8 +235,18 @@ def financials(ticker: str, db: Session = Depends(get_db)):
         price = get_price(st.symbol())
     except Exception:
         price = None  # 双保险：行情异常只降级，不阻塞接口
-    return {"columns": columns, "rows": rows, "ttm": ttm,
-            "shares_outstanding": shares, "price": price}
+    # 季度趋势序列（升序，含推算 Q4）：仅图表所需的 营收/净利润（亿$）
+    def _to_yi(v): return round(v / 100, 3) if v is not None else None
+    quarter_series = sorted(
+        ([{"label": a.quarter, "derived": False,
+           "revenue": _to_yi((a.metrics or {}).get("营收")),
+           "net_income": _to_yi((a.metrics or {}).get("净利润"))} for a in quarters]
+         + [{"label": d["label"], "derived": True,
+             "revenue": _to_yi(d["metrics"].get("营收")),
+             "net_income": _to_yi(d["metrics"].get("净利润"))} for d in derived]),
+        key=lambda x: x["label"])
+    return {"columns": out_columns, "rows": rows, "ttm": ttm,
+            "shares_outstanding": shares, "price": price, "quarters": quarter_series}
 
 
 @router.get("/stocks/{ticker}/analyses/{analysis_id}")

@@ -43,14 +43,100 @@
     </div>
 
     <div class="tabs">
-      <button :class="{ on: tab === 'filings' }" @click="tab = 'filings'">财报</button>
       <button :class="{ on: tab === 'financials' }" @click="tab = 'financials'">财报数据</button>
       <button :class="{ on: tab === 'dcf' }" @click="tab = 'dcf'">DCF</button>
-      <button :class="{ on: tab === 'analysis' }" @click="tab = 'analysis'">财报分析</button>
+      <button :class="{ on: tab === 'filings' }" @click="tab = 'filings'">财报列表</button>
     </div>
 
-    <!-- 财报 -->
-    <div v-if="tab === 'filings'">
+    <!-- 财报数据 -->
+    <div v-if="tab === 'financials'">
+      <template v-if="hasFinData">
+        <TrendChart v-if="hasMetrics" :series="qSeries" title="营收/净利润趋势（季度，亿$）" unit="亿$" />
+        <p v-if="hasDerived" class="chart-note">带 * 的期间为推算 Q4：10-K 全年 − 前三季（EPS/ROE 不推算）</p>
+        <div class="fin-table-wrapper">
+          <table class="fin-table">
+            <thead><tr>
+              <th class="row-label">指标</th>
+              <th v-for="c in fin.columns" :key="c.label" :class="{ qcol: c.kind === 'quarter' }"
+                  :title="c.derived ? DERIVED_TIP : null">{{ c.label }}<span v-if="c.derived">*</span></th>
+            </tr></thead>
+            <tbody>
+              <tr v-for="row in fin.rows" :key="row.key">
+                <td class="row-label">{{ row.label }}</td>
+                <td v-for="c in fin.columns" :key="c.label"
+                    :class="{ qcol: c.kind === 'quarter', derived: c.derived }">
+                  {{ fmtFin(row.values[c.label], row.type) }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <!-- DCF 基期信息：三成分明细表 + 每股估值（单位：亿$，DB 存百万 ÷100） -->
+        <div class="dcf-base">
+          <h3>DCF 基期信息<template v-if="fin.ttm">（{{ fin.ttm.base_period }}）</template></h3>
+          <template v-if="fin.ttm">
+            <table class="fin-table ttm-table">
+              <thead><tr><th class="row-label">项目</th><th>金额</th><th class="note-col">说明</th></tr></thead>
+              <tbody>
+                <tr><td class="row-label">净利润</td><td>{{ fmtYi(fin.ttm.net_income) }}</td><td class="note">{{ fin.ttm.notes?.net_income || '-' }}</td></tr>
+                <tr><td class="row-label">折旧摊销</td><td>{{ fmtYi(fin.ttm.depreciation) }}</td><td class="note">{{ fin.ttm.notes?.depreciation || '-' }}</td></tr>
+                <tr><td class="row-label">CapEx</td><td>{{ fmtYi(fin.ttm.capex) }}</td><td class="note">{{ fin.ttm.notes?.capex || '-' }}</td></tr>
+                <tr><td class="row-label">维护 CapEx</td><td>{{ fmtYi(fin.ttm.maintenance_capex) }}</td><td class="note">{{ fin.ttm.notes?.maintenance_capex || '-' }}</td></tr>
+                <tr class="oe-row"><td class="row-label">基期 OE</td><td><b>{{ fmtYi(fin.ttm.owner_earnings) }}</b></td><td class="note">{{ fin.ttm.notes?.owner_earnings || '-' }}</td></tr>
+                <tr><td class="row-label">流通股数</td><td>{{ fin.shares_outstanding != null ? fmtNum(fin.shares_outstanding) + 'M' : '-' }}</td><td class="note">最近一期财报</td></tr>
+              </tbody>
+            </table>
+          </template>
+          <p v-else class="empty">TTM 基期不可用（缺年报数据）</p>
+          <template v-if="latestVal">
+            <h3>每股估值<span class="src">（来自 {{ fmt(latestDcf.generated_at) }} DCF 报告）</span></h3>
+            <table class="fin-table val-table">
+              <thead><tr><th>每股内在价值</th><th>25%安全边际价</th><th>50%安全边际价</th><th>报告现价</th><th>现价 vs 内在价值</th></tr></thead>
+              <tbody><tr>
+                <td><b>{{ latestVal.intrinsic_value_per_share != null ? '$' + latestVal.intrinsic_value_per_share : '-' }}</b></td>
+                <td>{{ latestVal.safety_25_price != null ? '$' + latestVal.safety_25_price : '-' }}</td>
+                <td>{{ latestVal.safety_50_price != null ? '$' + latestVal.safety_50_price : '-' }}</td>
+                <td>{{ latestVal.price != null ? '$' + latestVal.price : '-' }}</td>
+                <td>{{ valPremium }}</td>
+              </tr></tbody>
+            </table>
+          </template>
+          <p v-else class="empty">暂无 DCF 报告，无法给出每股估值</p>
+        </div>
+      </template>
+      <p v-else-if="finLoading" class="empty">加载中…</p>
+      <p v-else class="empty">暂无分析数据，请先生成财报分析</p>
+    </div>
+
+    <!-- DCF -->
+    <div v-else-if="tab === 'dcf'">
+      <div class="item-list">
+        <div v-for="d in dcfList" :key="d.id" class="item clickable"
+             :class="{ active: activeDcfId === d.id }" @click="loadDcf(d)">
+          {{ fmt(d.generated_at) }}
+          <span v-if="isStale(d.generator_version, 'dcf')" class="stale-badge"
+                title="旧版生成器数据，建议重新生成">旧版</span>
+          <span v-if="d.growth != null || d.discount != null" class="muted">
+            （增长{{ d.growth }}% / 折现{{ d.discount }}%）
+          </span>
+          <span v-if="d.valuation" class="muted">
+            <template v-if="d.valuation.intrinsic_value_per_share != null">
+              每股 ${{ d.valuation.intrinsic_value_per_share }}，现价 ${{ d.valuation.price }}
+            </template>
+            <template v-else>内在价值 ${{ d.valuation.intrinsic_value_musd }}M，现价 ${{ d.valuation.price }}</template>
+          </span>
+          <button class="del-btn" :disabled="deletingDcfId === d.id"
+                  @click.stop="deleteDcf(d)">删除</button>
+        </div>
+        <p v-if="!dcfList.length" class="empty">暂无 DCF 报告，可点击上方"DCF 估值"发起</p>
+      </div>
+      <!-- 只渲染当前选中（loadDcf 成功后 activeDcfId 指向）且有估值的报告 -->
+      <DcfChart v-if="activeDcf" :key="activeDcf.id" :report="activeDcf" />
+      <MarkdownViewer v-if="dcfMd" :source="dcfMd" />
+    </div>
+
+    <!-- 财报列表 -->
+    <div v-else-if="tab === 'filings'">
       <table>
         <thead><tr>
           <th class="sortable" @click="sortFilings('form_type')">
@@ -88,111 +174,6 @@
         </tbody>
       </table>
     </div>
-
-    <!-- 财报分析 -->
-    <div v-else-if="tab === 'analysis'">
-      <template v-if="viewMode === 'list'">
-        <div class="item-list analysis-list">
-          <div v-for="a in analyses" :key="a.id" class="item clickable"
-               :class="{ active: activeAnalysisId === a.id }" @click="loadAnalysis(a)">
-            {{ a.form_type }} {{ a.quarter || 'FY' + a.fiscal_year }}
-            <span v-if="isStale(a.generator_version, 'analysis')" class="stale-badge"
-                  title="旧版生成器数据，建议重新生成">旧版</span>
-            <span class="muted">{{ a.period }}</span>
-          </div>
-          <p v-if="!analyses.length" class="empty">暂无分析报告，请先下载财报并生成分析</p>
-        </div>
-      </template>
-      <template v-else>
-        <div class="detail-toolbar">
-          <button class="btn" @click="viewMode = 'list'">← 返回</button>
-          <span class="detail-title">{{ analysisTitle }}</span>
-        </div>
-        <MarkdownViewer v-if="analysisMd" :source="analysisMd" />
-      </template>
-    </div>
-
-    <!-- 财报数据 -->
-    <div v-else-if="tab === 'financials'">
-      <template v-if="hasFinData">
-        <table class="fin-table">
-          <thead><tr>
-            <th class="row-label">指标</th>
-            <th v-for="c in fin.columns" :key="c.label" :class="{ qcol: c.kind === 'quarter' }">{{ c.label }}</th>
-          </tr></thead>
-          <tbody>
-            <tr v-for="row in fin.rows" :key="row.key">
-              <td class="row-label">{{ row.label }}</td>
-              <td v-for="c in fin.columns" :key="c.label" :class="{ qcol: c.kind === 'quarter' }">
-                {{ fmtFin(row.values[c.label], row.type) }}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <!-- DCF 基期信息：三成分明细表 + 每股估值（单位：亿$，DB 存百万 ÷100） -->
-        <div class="dcf-base">
-          <h3>DCF 基期信息<template v-if="fin.ttm">（{{ fin.ttm.base_period }}）</template></h3>
-          <template v-if="fin.ttm">
-            <table class="fin-table ttm-table">
-              <thead><tr><th class="row-label">项目</th><th>金额</th><th class="note-col">说明</th></tr></thead>
-              <tbody>
-                <tr><td class="row-label">净利润</td><td>{{ fmtYi(fin.ttm.net_income) }}</td><td class="note">{{ fin.ttm.notes?.net_income || '-' }}</td></tr>
-                <tr><td class="row-label">折旧摊销</td><td>{{ fmtYi(fin.ttm.depreciation) }}</td><td class="note">{{ fin.ttm.notes?.depreciation || '-' }}</td></tr>
-                <tr><td class="row-label">CapEx</td><td>{{ fmtYi(fin.ttm.capex) }}</td><td class="note">{{ fin.ttm.notes?.capex || '-' }}</td></tr>
-                <tr><td class="row-label">维护 CapEx</td><td>{{ fmtYi(fin.ttm.maintenance_capex) }}</td><td class="note">{{ fin.ttm.notes?.maintenance_capex || '-' }}</td></tr>
-                <tr class="oe-row"><td class="row-label">基期 OE</td><td><b>{{ fmtYi(fin.ttm.owner_earnings) }}</b></td><td class="note">{{ fin.ttm.notes?.owner_earnings || '-' }}</td></tr>
-                <tr><td class="row-label">流通股数</td><td>{{ fin.shares_outstanding != null ? fmtNum(fin.shares_outstanding) + 'M' : '-' }}</td><td class="note">最近一期财报</td></tr>
-              </tbody>
-            </table>
-          </template>
-          <p v-else class="empty">TTM 基期不可用（缺年报数据）</p>
-          <template v-if="latestVal">
-            <h3>每股估值<span class="src">（来自 {{ fmt(latestDcf.generated_at) }} DCF 报告）</span></h3>
-            <table class="fin-table val-table">
-              <thead><tr><th>每股内在价值</th><th>25%安全边际价</th><th>50%安全边际价</th><th>报告现价</th><th>现价 vs 内在价值</th></tr></thead>
-              <tbody><tr>
-                <td><b>{{ latestVal.intrinsic_value_per_share != null ? '$' + latestVal.intrinsic_value_per_share : '-' }}</b></td>
-                <td>{{ latestVal.safety_25_price != null ? '$' + latestVal.safety_25_price : '-' }}</td>
-                <td>{{ latestVal.safety_50_price != null ? '$' + latestVal.safety_50_price : '-' }}</td>
-                <td>{{ latestVal.price != null ? '$' + latestVal.price : '-' }}</td>
-                <td>{{ valPremium }}</td>
-              </tr></tbody>
-            </table>
-          </template>
-          <p v-else class="empty">暂无 DCF 报告，无法给出每股估值</p>
-        </div>
-        <TrendChart v-if="hasMetrics" :series="metricsSeries" title="营收/净利润趋势（百万$）" />
-      </template>
-      <p v-else-if="finLoading" class="empty">加载中…</p>
-      <p v-else class="empty">暂无分析数据，请先生成财报分析</p>
-    </div>
-
-    <!-- DCF -->
-    <div v-else-if="tab === 'dcf'">
-      <div class="item-list">
-        <div v-for="d in dcfList" :key="d.id" class="item clickable"
-             :class="{ active: activeDcfId === d.id }" @click="loadDcf(d)">
-          {{ fmt(d.generated_at) }}
-          <span v-if="isStale(d.generator_version, 'dcf')" class="stale-badge"
-                title="旧版生成器数据，建议重新生成">旧版</span>
-          <span v-if="d.growth != null || d.discount != null" class="muted">
-            （增长{{ d.growth }}% / 折现{{ d.discount }}%）
-          </span>
-          <span v-if="d.valuation" class="muted">
-            <template v-if="d.valuation.intrinsic_value_per_share != null">
-              每股 ${{ d.valuation.intrinsic_value_per_share }}，现价 ${{ d.valuation.price }}
-            </template>
-            <template v-else>内在价值 ${{ d.valuation.intrinsic_value_musd }}M，现价 ${{ d.valuation.price }}</template>
-          </span>
-          <button class="del-btn" :disabled="deletingDcfId === d.id"
-                  @click.stop="deleteDcf(d)">删除</button>
-        </div>
-        <p v-if="!dcfList.length" class="empty">暂无 DCF 报告，可点击上方"DCF 估值"发起</p>
-      </div>
-      <!-- 只渲染当前选中（loadDcf 成功后 activeDcfId 指向）且有估值的报告 -->
-      <DcfChart v-if="activeDcf" :key="activeDcf.id" :report="activeDcf" />
-      <MarkdownViewer v-if="dcfMd" :source="dcfMd" />
-    </div>
   </div>
   <p v-else class="empty">加载中…</p>
 
@@ -211,21 +192,19 @@ const props = defineProps({ ticker: String })
 const taskStore = useTaskStore()
 
 const detail = ref(null), analyses = ref([]), dcfList = ref([])
-const metricsSeries = ref([]) // Task 14 图表数据：[{ name:'营收', years:[...], values:[...] }, ...]
-const fin = ref(null) // 财报数据 Tab：/financials 接口（columns/rows/ttm/shares/price）
+const fin = ref(null) // 财报数据 Tab：/financials 接口（columns/rows/ttm/shares/price/quarters）
 const finLoading = ref(false)
-const tab = ref('filings'), dcfModal = ref(false) // dcfModal：DCF 参数弹窗开关
+const tab = ref('financials'), dcfModal = ref(false) // dcfModal：DCF 参数弹窗开关
 const aliasEditing = ref(false), aliasInput = ref('')
-const analysisMd = ref(''), dcfMd = ref('')
-const activeAnalysisId = ref(null), activeDcfId = ref(null)
-const viewMode = ref('list') // 分析 Tab 页内视图：list=列表，detail=单篇分析正文
+const dcfMd = ref('')
+const activeDcfId = ref(null)
 const clearing = ref(false) // 清空分析请求进行中，防连点
 const deletingDcfId = ref(null) // 删除请求进行中的 DCF 行 id，防连点
 const dcfForm = reactive({ growth: '', discount: '', years: '', safety: '' })
 const curVersions = ref(null) // 当前生成器版本（/api/versions，加载时取一次），用于旧版徽标
 const rowBusyId = ref(null) // 财报列表行内「生成中…」的 filing id（防连点）
 const message = ref(''), messageType = ref('success')
-let toastTimer, pollTimer, seq = 0, finSeq = 0 // finSeq：financials 请求专用守卫（seq 会被 loadAnalysis/loadDcf 推进，不能复用）
+let toastTimer, pollTimer, seq = 0, finSeq = 0 // finSeq：financials 请求专用守卫（seq 会被 loadDcf 推进，不能复用）
 
 const TASK_LABELS = { download: '下载财报', analysis: '生成分析', dcf: 'DCF 估值' }
 const taskLabel = (t) => TASK_LABELS[t] || t
@@ -246,8 +225,22 @@ const sortedFilings = computed(() => {
     return av < bv ? -mul : av > bv ? mul : 0
   })
 })
-// metricsSeries 恒含两条序列（构造函数 map 产出），需按真实数据有无判断空态
-const hasMetrics = computed(() => metricsSeries.value.some((s) => s.values.some((v) => v != null)))
+// Q4 推算列说明（悬浮提示 + 图表脚注）
+const DERIVED_TIP = 'Q4 为推算值：利润表科目 = 10-K 全年 − Q1 − Q2 − Q3；自由现金流 = 全年 − Q3 累计值；期末类科目取 10-K 期末值；EPS/ROE 不推算'
+// 季度趋势序列：/financials quarters（真实 Q1–Q3 + 推算 Q4）全量；
+// 推算点 x 轴带 *，绘图时降透明度区分
+const qSeries = computed(() => {
+  const qs = fin.value?.quarters || []
+  const labels = qs.map((q) => q.label + (q.derived ? '*' : ''))
+  const derived = qs.map((q) => q.derived)
+  return [
+    { name: '营收', years: labels, values: qs.map((q) => q.revenue), derived },
+    { name: '净利润', years: labels, values: qs.map((q) => q.net_income), derived },
+  ]
+})
+// 恒含两条序列（构造函数 map 产出），需按真实数据有无判断空态
+const hasMetrics = computed(() => qSeries.value.some((s) => s.values.some((v) => v != null)))
+const hasDerived = computed(() => qSeries.value.some((s) => s.derived.some(Boolean)))
 // 财报数据 Tab 有无数据：columns 为空即无分析记录 → 空态提示先生成分析
 const hasFinData = computed(() => !!fin.value && fin.value.columns.length > 0)
 // 每股估值：取最新一条 DCF 报告的 valuation（dcfList 按 generated_at 倒序）
@@ -264,20 +257,14 @@ const valPremium = computed(() => {
 const fmtYi = (v) => (v == null ? '-' : (v / 100).toLocaleString('zh-CN', { minimumFractionDigits: 1, maximumFractionDigits: 1 }))
 // 通用数字：一位小数千分位（股数等）
 const fmtNum = (v) => (v == null ? '-' : v.toLocaleString('zh-CN', { minimumFractionDigits: 1, maximumFractionDigits: 1 }))
-// 表格单元格：money_yi 后端已折算成亿$，直接千分位展示（不得再 ÷100）；ratio 带百分号、eps 带 $；缺数据显示 -（不编造）
+// 表格单元格：money_yi 后端已折算成亿$，保留三位小数；ratio 带百分号、eps 带 $；缺数据显示 -（不编造）
 function fmtFin(v, type) {
   if (v == null) return '-'
-  if (type === 'money_yi') return fmtNum(v)
+  if (type === 'money_yi') return v.toLocaleString('zh-CN', { minimumFractionDigits: 3, maximumFractionDigits: 3 })
   if (type === 'ratio') return `${v}%`
   if (type === 'eps') return `$${v}`
   return v
 }
-// 详情页标题：form_type + 季度/财年 + 报告期
-const analysisTitle = computed(() => {
-  const a = analyses.value.find((x) => x.id === activeAnalysisId.value)
-  if (!a) return ''
-  return `${a.form_type} ${a.quarter || 'FY' + a.fiscal_year}${a.period ? ' · ' + a.period : ''}`
-})
 const fmt = (s) => (s ? new Date(s).toLocaleString('zh-CN', { hour12: false }) : '')
 
 // 旧版判断（仅展示提示，不阻断）：无版本号（legacy 旧数据）或 ≠ 当前生成器版本；
@@ -291,20 +278,10 @@ function showToast(text, type = 'success') {
   toastTimer = setTimeout(() => { message.value = '' }, 3000)
 }
 
-function buildMetricsSeries(list) {
-  // 图表只取年报口径（quarter 为空，含 10-K/20-F），季度数据不混入趋势
-  const withMetrics = list.filter((a) => a.metrics && !a.quarter)
-  metricsSeries.value = ['营收', '净利润'].map((key) => ({
-    name: key,
-    years: withMetrics.map((a) => 'FY' + a.fiscal_year),
-    values: withMetrics.map((a) => a.metrics[key] ?? null),
-  }))
-}
-
 async function loadAll() {
   const my = ++seq
   // 财报数据独立请求（并行 + 专用 finSeq 守卫）：不能放在 loadAll 尾部复用 seq——
-  // 主 try 内 await loadAnalysis / loadDcf 会推进同一 seq，尾部 my===seq 永假，
+  // 主 try 内 await loadDcf 会推进同一 seq，尾部 my===seq 永假，
   // fin 永不赋值、finLoading 永真 → Tab 永远卡「加载中…」
   loadFinancials()
   try {
@@ -315,15 +292,6 @@ async function loadAll() {
     detail.value = stock
     analyses.value = aList
     dcfList.value = dList
-    // 数据刷新不踢出已打开的分析详情：仅当选中的分析不在新列表（被清空/换股）时才重置视图
-    if (!aList.some((a) => a.id === activeAnalysisId.value)) {
-      analysisMd.value = ''
-      activeAnalysisId.value = null
-      viewMode.value = 'list'
-      // 默认选中第一条（最新）分析并直接进入正文视图；列表仅在后退时可见（限高滚动）
-      if (aList.length) await loadAnalysis(aList[0])
-    }
-    buildMetricsSeries(aList)
     // 数据刷新不踢出已选中的 DCF 报告：与分析 Tab 同款守卫，
     // 任务完成轮询触发 loadAll 时保持用户手动选中的第 N 条（正文与图表不动）
     if (dList.some((d) => d.id === activeDcfId.value)) return
@@ -434,26 +402,13 @@ async function loadFinancials() {
   }
 }
 
-async function loadAnalysis(a) {
-  const my = ++seq
-  try {
-    const d = await api.analysis(props.ticker, a.id)
-    if (my !== seq) return
-    activeAnalysisId.value = a.id
-    analysisMd.value = d.markdown
-    viewMode.value = 'detail'
-  } catch {
-    if (my === seq) showToast('加载分析报告失败', 'error')
-  }
-}
-
 async function clearAllAnalyses() {
   if (!confirm(`清空 ${props.ticker} 的全部分析记录与文件？`)) return
   clearing.value = true
   try {
     await api.clearAnalyses(props.ticker)
     showToast('分析已清空')
-    await loadAll()  // 会重置 viewMode/正文/选中态
+    await loadAll()
   } catch (e) {
     showToast(e.message || '清空失败', 'error')
   } finally {
@@ -594,7 +549,6 @@ onUnmounted(() => { clearInterval(pollTimer); clearTimeout(toastTimer) })
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 .item-list { padding: 8px 0; }
 /* 分析列表态：限高约 5 行，超出滚动（默认直接进 detail 视图，列表仅后退时可见） */
-.analysis-list { max-height: 200px; overflow-y: auto; }
 .item { padding: 8px 12px; border-bottom: 1px solid #eee; }
 .item.active { color: #0366d6; background: #f6f8fa; }
 /* 三态按钮「财报更新」态：橙底提示旧版产物待更新 */
@@ -627,6 +581,7 @@ onUnmounted(() => { clearInterval(pollTimer); clearTimeout(toastTimer) })
 .sortable { cursor: pointer; user-select: none; white-space: nowrap; }
 .sortable:hover { color: #2563eb; }
 .sort-mark { margin-left: 2px; color: #2563eb; }
+.fin-table-wrapper { overflow-x: auto; max-width: 100%; }
 /* 财报数据 Tab：指标表（行=指标，列=报告期）；季度列浅色底与年报列区分 */
 .fin-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .fin-table th, .fin-table td {
@@ -636,6 +591,9 @@ onUnmounted(() => { clearInterval(pollTimer); clearTimeout(toastTimer) })
 .fin-table th { border-bottom: 2px solid #ddd; }
 .fin-table .row-label { text-align: left; font-weight: 600; color: #444; }
 .fin-table .qcol { background: #f6f8fa; }
+/* 推算 Q4 列：数值斜体 + 偏灰，与真实披露数据区分 */
+.fin-table .derived { color: #64748b; font-style: italic; }
+.chart-note { font-size: 12px; color: #94a3b8; margin-top: -6px; }
 /* DCF 基期信息段 */
 .dcf-base {
   border: 1px solid #e5e7eb; border-radius: 8px;
