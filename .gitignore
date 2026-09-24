@@ -27,3 +27,6 @@ scripts/sec_analysis/__pycache__/main.cpython-314.pyc
 scripts/sec_analysis/__pycache__/report.cpython-314.pyc
 scripts/sec_analysis/__pycache__/sec_10k.cpython-314.pyc
 scripts/sec_analysis/__pycache__/sec_10q.cpython-314.pyc
+logs/*.log
+logs/tasks/*.log
+webapp/logs/*.log

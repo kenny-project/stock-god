@@ -29,6 +29,7 @@ metadata:
 | `/stock-god analyze US.NKE` | 分析最新 SEC 财报，提取关键章节和财务指标 |
 | `/stock-god analyze QCOM --form 10-K` | 分析指定表单类型的财报 |
 | `/stock-god dcf US.NKE` | 巴菲特式 DCF 现金流折现估值 |
+| `/stock-god buffett US.QCOM` | 伯克希尔式价值投资分析（先跑数据包，再出定性+定量报告） |
 | `/stock-god vix` | VIX 恐慌指数查询 |
 | `/stock-god fees` | 手续费统计报告（按月/年/总汇总）|
 | `/stock-god fees --year 2025` | 查询指定年份的手续费 |
@@ -56,7 +57,7 @@ metadata:
 - **数据源优先级**: Futu OpenD > FMP > Finviz > 腾讯财经 > Alpha Vantage
 - **报告输出目录**: `reports/`（项目根目录下）
 - **缓存目录**: `~/.openclaw/cache/stock-god/`
-- **SEC 财报**: 需先 `download` 再 `analyze`，再用 `dcf` 做估值
+- **SEC 财报**: 需先 `download` 再 `analyze`，再用 `dcf` 做估值；`buffett` 分析依赖 `analyze` 与 `dcf` 生成的本地数据
 
 
 
